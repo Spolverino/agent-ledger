@@ -144,4 +144,4 @@ format = "ruff format effect_ledger/ tests/"
 format-check = "ruff format --check effect_ledger/ tests/"
 typecheck = "mypy effect_ledger/"
 check = ["lint", "format-check", "typecheck", "test"]
-all = ["lint-fix", "format", "typecheck", "test-cov"]
+all = ["lint", "format", "typecheck", "test-cov"]
