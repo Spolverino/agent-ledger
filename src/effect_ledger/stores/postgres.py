@@ -121,8 +121,14 @@ class PostgresStore:
                     input_data.args_canonical,
                     input_data.resource_id_canonical,
                     json.dumps(input_data.result) if input_data.result else None,
-                    json.dumps({"message": input_data.error.message, "code": input_data.error.code})
-                    if input_data.error else None,
+                    json.dumps(
+                        {
+                            "message": input_data.error.message,
+                            "code": input_data.error.code,
+                        }
+                    )
+                    if input_data.error
+                    else None,
                     now,
                     now,
                     now if is_terminal_status(input_data.status) else None,
@@ -212,14 +218,23 @@ class PostgresStore:
             error=EffectError(
                 message=error_data["message"],
                 code=error_data.get("code"),
-            ) if error_data else None,
+            )
+            if error_data
+            else None,
             dedup_count=int(row["dedup_count"]),
-            created_at=row["created_at"] if isinstance(row["created_at"], datetime)
+            created_at=row["created_at"]
+            if isinstance(row["created_at"], datetime)
             else datetime.fromisoformat(str(row["created_at"])),
-            updated_at=row["updated_at"] if isinstance(row["updated_at"], datetime)
+            updated_at=row["updated_at"]
+            if isinstance(row["updated_at"], datetime)
             else datetime.fromisoformat(str(row["updated_at"])),
-            completed_at=row["completed_at"] if isinstance(row.get("completed_at"), datetime)
-            else (datetime.fromisoformat(str(row["completed_at"])) if row.get("completed_at") else None),
+            completed_at=row["completed_at"]
+            if isinstance(row.get("completed_at"), datetime)
+            else (
+                datetime.fromisoformat(str(row["completed_at"]))
+                if row.get("completed_at")
+                else None
+            ),
         )
 
 

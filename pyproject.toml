@@ -30,6 +30,7 @@ classifiers = [
 ]
 dependencies = [
     "cachetools>=5.3.0",
+    "rfc8785>=0.1.2",
 ]
 
 [project.optional-dependencies]

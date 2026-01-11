@@ -108,16 +108,22 @@ class MemoryStore:
     ) -> bool:
         async with self._lock:
             effect = self._cache.get(effect_id)
+
             if effect is None:
                 return False
+
             if effect.status != from_status:
                 return False
 
             now = datetime.now(tz=timezone.utc)
-            error_obj = EffectError(
-                message=error.get("message") or "",
-                code=error.get("code"),
-            ) if error else None
+            error_obj = (
+                EffectError(
+                    message=error.get("message") or "",
+                    code=error.get("code"),
+                )
+                if error
+                else None
+            )
 
             updated = Effect(
                 id=effect.id,
@@ -133,7 +139,9 @@ class MemoryStore:
                 dedup_count=effect.dedup_count,
                 created_at=effect.created_at,
                 updated_at=now,
-                completed_at=now if is_terminal_status(to_status) else effect.completed_at,
+                completed_at=now
+                if is_terminal_status(to_status)
+                else effect.completed_at,
             )
 
             self._cache[effect_id] = updated

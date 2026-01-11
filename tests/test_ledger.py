@@ -1,15 +1,11 @@
 import pytest
 
 from effect_ledger import (
-    EffectDeniedError,
     EffectFailedError,
     EffectLedger,
     EffectLedgerOptions,
-    EffectTimeoutError,
     MemoryStore,
-    RunOptions,
     ToolCall,
-    ConcurrencyOptions,
 )
 
 
@@ -63,6 +59,7 @@ class TestBegin:
         begin_result = await ledger.begin(call)
 
         from effect_ledger import CommitSucceeded
+
         await ledger.commit(begin_result.effect.id, CommitSucceeded(result="done"))
 
         result = await ledger.begin(call)
@@ -93,6 +90,7 @@ class TestCommit:
         begin_result = await ledger.begin(make_call())
 
         from effect_ledger import CommitSucceeded
+
         await ledger.commit(
             begin_result.effect.id,
             CommitSucceeded(result={"data": 123}),
@@ -109,9 +107,12 @@ class TestCommit:
         begin_result = await ledger.begin(make_call())
 
         from effect_ledger import CommitFailed, EffectError
+
         await ledger.commit(
             begin_result.effect.id,
-            CommitFailed(error=EffectError(code="ERR_TEST", message="Something went wrong")),
+            CommitFailed(
+                error=EffectError(code="ERR_TEST", message="Something went wrong")
+            ),
         )
 
         updated = await ledger.get_effect(begin_result.effect.id)

@@ -42,7 +42,11 @@ async def main() -> None:
             resource=ResourceDescriptor(
                 namespace="github",
                 type="issue",
-                id={"owner": params["owner"], "repo": params["repo"], "title": params["title"]},
+                id={
+                    "owner": params["owner"],
+                    "repo": params["repo"],
+                    "title": params["title"],
+                },
             ),
         ),
         handler=lambda effect: mock_github_create_issue(params),
@@ -58,7 +62,11 @@ async def main() -> None:
             resource=ResourceDescriptor(
                 namespace="github",
                 type="issue",
-                id={"owner": params["owner"], "repo": params["repo"], "title": params["title"]},
+                id={
+                    "owner": params["owner"],
+                    "repo": params["repo"],
+                    "title": params["title"],
+                },
             ),
         ),
         handler=lambda effect: mock_github_create_issue(params),
@@ -80,7 +88,11 @@ async def main() -> None:
             resource=ResourceDescriptor(
                 namespace="github",
                 type="issue",
-                id={"owner": params2["owner"], "repo": params2["repo"], "title": params2["title"]},
+                id={
+                    "owner": params2["owner"],
+                    "repo": params2["repo"],
+                    "title": params2["title"],
+                },
             ),
         ),
         handler=lambda effect: mock_github_create_issue(params2),
@@ -127,7 +139,9 @@ async def main() -> None:
     print(f"Total effects stored: {store.size}")
     print("\nEffects in ledger:")
     for effect in store.list_effects():
-        print(f"  - {effect.tool} [{effect.status.value}] dedup_count={effect.dedup_count}")
+        print(
+            f"  - {effect.tool} [{effect.status.value}] dedup_count={effect.dedup_count}"
+        )
 
 
 if __name__ == "__main__":

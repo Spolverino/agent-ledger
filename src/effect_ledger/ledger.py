@@ -255,6 +255,7 @@ class EffectLedger(Generic[TxT]):
             self._defaults.run if self._defaults else None,
             run_options,
         )
+
         requires_approval = run_options.requires_approval if run_options else False
 
         begin_result = await self.begin(call, tx)
