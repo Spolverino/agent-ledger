@@ -36,7 +36,7 @@ jobs:
         run: pip install -e .
 
       - name: Mypy
-        run: mypy src/effect_ledger/
+        run: mypy effect_ledger/
 
   test:
     runs-on: ubuntu-latest

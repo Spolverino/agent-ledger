@@ -1,12 +1,12 @@
 [project]
-name = "effect-ledger"
-version = "0.1.0"
+name = "@rune0/ledger"
+version = "0.0.1"
 description = "Idempotency and audit ledger for AI agent tool calls"
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.10"
 authors = [
-    { name = "Rune0", email = "team@rune0.dev" }
+    { name = "Rune0", email = "team@rune0.com" }
 ]
 keywords = [
     "idempotency",

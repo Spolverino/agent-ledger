@@ -1,10 +1,17 @@
 import pytest
 
+import asyncio
+from datetime import datetime, timedelta, timezone
+from unittest.mock import AsyncMock, patch
+
 from effect_ledger import (
     EffectFailedError,
     EffectLedger,
     EffectLedgerOptions,
+    EffectStatus,
     MemoryStore,
+    RunOptions,
+    StaleOptions,
     ToolCall,
 )
 
@@ -314,3 +321,225 @@ class TestApprovalFlow:
         assert updated.status.value == "denied"
         assert updated.error is not None
         assert updated.error.message == "Not authorized"
+
+
+class TestConcurrency:
+    """Tests for concurrent execution scenarios and race condition handling."""
+
+    async def test_concurrent_ready_claim_only_one_handler_executes(
+        self, store: MemoryStore
+    ) -> None:
+        """When multiple workers race to claim a READY effect, only one executes."""
+        ledger = EffectLedger(EffectLedgerOptions(store=store))
+        call = make_call(args={"concurrent": "ready_claim"})
+
+        # Set up: create effect and move to READY state
+        begin_result = await ledger.begin(call)
+        await ledger.request_approval(begin_result.effect.idem_key)
+        await ledger.approve(begin_result.effect.idem_key)
+
+        # Verify it's in READY state
+        effect = await store.find_by_idem_key(begin_result.effect.idem_key)
+        assert effect is not None
+        assert effect.status == EffectStatus.READY
+
+        # Track handler executions
+        execution_count = 0
+        execution_lock = asyncio.Lock()
+
+        async def counting_handler(eff):
+            nonlocal execution_count
+            async with execution_lock:
+                execution_count += 1
+                current = execution_count
+            await asyncio.sleep(0.01)  # Simulate work
+            return {"executed_by": current}
+
+        # Race: 5 concurrent workers try to run the same effect
+        tasks = [ledger.run(call, counting_handler) for _ in range(5)]
+        results = await asyncio.gather(*tasks)
+
+        # All should get the same result
+        assert all(r == {"executed_by": 1} for r in results)
+        # Handler should only execute once
+        assert execution_count == 1
+
+    async def test_concurrent_processing_only_one_handler_executes(
+        self, store: MemoryStore
+    ) -> None:
+        """When multiple workers call run() simultaneously, only one executes."""
+        ledger = EffectLedger(EffectLedgerOptions(store=store))
+        call = make_call(args={"concurrent": "processing"})
+
+        execution_count = 0
+        execution_lock = asyncio.Lock()
+        started = asyncio.Event()
+
+        async def slow_handler(eff):
+            nonlocal execution_count
+            async with execution_lock:
+                execution_count += 1
+            started.set()
+            await asyncio.sleep(0.05)  # Simulate work
+            return {"result": "done"}
+
+        async def worker():
+            return await ledger.run(call, slow_handler)
+
+        # Start first worker
+        task1 = asyncio.create_task(worker())
+        await started.wait()  # Wait for it to start
+
+        # Start 4 more workers while first is running
+        tasks = [asyncio.create_task(worker()) for _ in range(4)]
+        tasks.insert(0, task1)
+
+        results = await asyncio.gather(*tasks)
+
+        # All get same result
+        assert all(r == {"result": "done"} for r in results)
+        # Only one execution
+        assert execution_count == 1
+
+    async def test_stale_takeover_returns_winner_result(
+        self, store: MemoryStore
+    ) -> None:
+        """When worker B takes over stale effect from A, B's result is returned."""
+        # Very short stale threshold for testing
+        stale_options = RunOptions(stale=StaleOptions(after_ms=50))
+        ledger = EffectLedger(EffectLedgerOptions(store=store))
+        call = make_call(args={"stale": "takeover"})
+
+        worker_a_started = asyncio.Event()
+        worker_a_continue = asyncio.Event()
+
+        async def slow_handler_a(eff):
+            worker_a_started.set()
+            await worker_a_continue.wait()  # Wait until told to continue
+            return {"from": "worker_a"}
+
+        async def fast_handler_b(eff):
+            return {"from": "worker_b"}
+
+        # Worker A starts but hangs
+        task_a = asyncio.create_task(
+            ledger.run(call, slow_handler_a, run_options=stale_options)
+        )
+        await worker_a_started.wait()
+
+        # Get effect directly from store
+        effects = store.list_effects()
+        assert len(effects) == 1
+        effect = effects[0]
+
+        # Artificially age the effect by modifying updated_at
+        old_time = datetime.now(tz=timezone.utc) - timedelta(milliseconds=100)
+        aged_effect = effect.__class__(
+            id=effect.id,
+            idem_key=effect.idem_key,
+            workflow_id=effect.workflow_id,
+            call_id=effect.call_id,
+            tool=effect.tool,
+            status=effect.status,
+            args_canonical=effect.args_canonical,
+            resource_id_canonical=effect.resource_id_canonical,
+            result=effect.result,
+            error=effect.error,
+            dedup_count=effect.dedup_count,
+            created_at=effect.created_at,
+            updated_at=old_time,  # Make it look stale
+            completed_at=effect.completed_at,
+        )
+        store._cache[effect.id] = aged_effect
+
+        # Worker B takes over
+        result_b = await ledger.run(call, fast_handler_b, run_options=stale_options)
+
+        # Worker B should win
+        assert result_b == {"from": "worker_b"}
+
+        # Let worker A continue - it should return B's result (not its own)
+        worker_a_continue.set()
+        result_a = await task_a
+
+        # Worker A should also return B's result (the committed one)
+        assert result_a == {"from": "worker_b"}
+
+    async def test_transition_failure_returns_actual_committed_result(
+        self, store: MemoryStore
+    ) -> None:
+        """When transition fails (someone else committed), return their result."""
+        ledger = EffectLedger(EffectLedgerOptions(store=store))
+        call = make_call(args={"transition": "race"})
+
+        # Begin effect
+        begin_result = await ledger.begin(call)
+        effect_id = begin_result.effect.id
+        idem_key = begin_result.effect.idem_key
+
+        # Simulate: another worker already committed a different result
+        await store.transition(
+            effect_id,
+            EffectStatus.PROCESSING,
+            EffectStatus.SUCCEEDED,
+            result={"from": "other_worker"},
+        )
+
+        # Now our handler runs but transition will fail
+        async def our_handler(eff):
+            return {"from": "our_handler"}
+
+        # Calling run again should return the cached result
+        result = await ledger.run(call, our_handler)
+
+        # Should get the already-committed result
+        assert result == {"from": "other_worker"}
+
+    async def test_concurrent_approval_only_one_executes_after_approve(
+        self, store: MemoryStore
+    ) -> None:
+        """Multiple waiters on approval, only one executes after approved."""
+        ledger = EffectLedger(EffectLedgerOptions(store=store))
+        call = make_call(args={"approval": "concurrent"})
+
+        execution_count = 0
+        waiters_ready = asyncio.Event()
+        waiter_count = 0
+        waiter_lock = asyncio.Lock()
+
+        async def handler(eff):
+            nonlocal execution_count
+            execution_count += 1
+            await asyncio.sleep(0.01)
+            return {"executed": True}
+
+        async def waiter():
+            nonlocal waiter_count
+            async with waiter_lock:
+                waiter_count += 1
+                if waiter_count >= 3:
+                    waiters_ready.set()
+            return await ledger.run(
+                call,
+                handler,
+                run_options=RunOptions(requires_approval=True),
+            )
+
+        # Start 3 waiters
+        tasks = [asyncio.create_task(waiter()) for _ in range(3)]
+
+        # Wait for all to be waiting
+        await waiters_ready.wait()
+        await asyncio.sleep(0.02)  # Let them enter wait state
+
+        # Approve
+        effect = store.list_effects()[0]
+        await ledger.approve(effect.idem_key)
+
+        # All waiters should complete
+        results = await asyncio.gather(*tasks)
+
+        # All should get same result
+        assert all(r == {"executed": True} for r in results)
+        # Only one execution
+        assert execution_count == 1

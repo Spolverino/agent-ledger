@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -83,22 +83,22 @@ class PostgresStore:
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 0, %s, %s, %s)
             ON CONFLICT (idem_key) DO UPDATE SET
               status = CASE
-                WHEN {TABLE_NAME}.status IN ('succeeded', 'failed', 'canceled', 'denied')
+                WHEN {TABLE_NAME}.status IN ('succeeded', 'failed', 'canceled', 'denied', 'requires_approval', 'ready')
                 THEN {TABLE_NAME}.status
                 ELSE EXCLUDED.status
               END,
               result = CASE
-                WHEN {TABLE_NAME}.status IN ('succeeded', 'failed', 'canceled', 'denied')
+                WHEN {TABLE_NAME}.status IN ('succeeded', 'failed', 'canceled', 'denied', 'requires_approval', 'ready')
                 THEN {TABLE_NAME}.result
                 ELSE EXCLUDED.result
               END,
               error = CASE
-                WHEN {TABLE_NAME}.status IN ('succeeded', 'failed', 'canceled', 'denied')
+                WHEN {TABLE_NAME}.status IN ('succeeded', 'failed', 'canceled', 'denied', 'requires_approval', 'ready')
                 THEN {TABLE_NAME}.error
                 ELSE EXCLUDED.error
               END,
               updated_at = CASE
-                WHEN {TABLE_NAME}.status IN ('succeeded', 'failed', 'canceled', 'denied')
+                WHEN {TABLE_NAME}.status IN ('succeeded', 'failed', 'canceled', 'denied', 'requires_approval', 'ready')
                 THEN {TABLE_NAME}.updated_at
                 ELSE EXCLUDED.updated_at
               END,
@@ -164,11 +164,14 @@ class PostgresStore:
     ) -> bool:
         now = datetime.now(tz=timezone.utc)
 
+        # CAS: status must match AND must not be terminal (all in WHERE clause)
         query = f"""
             UPDATE {TABLE_NAME}
             SET status = %s, result = %s, error = %s, updated_at = %s,
                 completed_at = CASE WHEN %s THEN %s ELSE completed_at END
-            WHERE id = %s AND status = %s
+            WHERE id = %s 
+              AND status = %s
+              AND status NOT IN ('succeeded', 'failed', 'canceled', 'denied')
         """
 
         conn = tx or self._pool
@@ -216,23 +219,27 @@ class PostgresStore:
 
         if from_status == EffectStatus.PROCESSING and stale_threshold_ms is not None:
             # Stale claim: only claim if updated_at is older than threshold
+            # Calculate cutoff in Python to avoid SQL interval syntax issues
+            cutoff = now - timedelta(milliseconds=stale_threshold_ms)
+
             query = f"""
                 UPDATE {TABLE_NAME}
                 SET status = 'processing', updated_at = %s
                 WHERE id = %s AND status = 'processing'
-                  AND updated_at < %s - INTERVAL '%s milliseconds'
+                  AND updated_at < %s
             """
 
             async with conn.cursor() as cur:
-                await cur.execute(query, (now, effect_id, now, stale_threshold_ms))
+                await cur.execute(query, (now, effect_id, cutoff))
                 return bool(cur.rowcount == 1)
 
         else:
-            # READY claim: simple CAS
+            # READY claim: CAS with terminal guard
             query = f"""
                 UPDATE {TABLE_NAME}
                 SET status = 'processing', updated_at = %s
                 WHERE id = %s AND status = %s
+                  AND status NOT IN ('succeeded', 'failed', 'canceled', 'denied')
             """
 
             async with conn.cursor() as cur:
@@ -301,5 +308,5 @@ CREATE TABLE IF NOT EXISTS effects (
 
 CREATE INDEX IF NOT EXISTS idx_effects_idem_key ON effects (idem_key);
 CREATE INDEX IF NOT EXISTS idx_effects_workflow_id ON effects (workflow_id);
-CREATE INDEX IF NOT EXISTS idx_effects_status ON effects (status) WHERE status NOT IN ('succeeded', 'failed');
+CREATE INDEX IF NOT EXISTS idx_effects_status ON effects (status) WHERE status NOT IN ('succeeded', 'failed', 'canceled', 'denied');
 """

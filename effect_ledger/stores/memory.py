@@ -113,7 +113,11 @@ class MemoryStore:
             if effect is None:
                 return False
 
+            # CAS: status must match AND must not be terminal (atomic check)
             if effect.status != from_status:
+                return False
+
+            if is_terminal_status(effect.status):
                 return False
 
             now = datetime.now(tz=timezone.utc)
@@ -206,8 +210,10 @@ class MemoryStore:
                 if age_ms <= stale_threshold_ms:
                     return False
             else:
-                # READY claim: just check status
+                # READY claim: check status AND ensure not terminal
                 if effect.status != from_status:
+                    return False
+                if is_terminal_status(effect.status):
                     return False
 
             # Claim it by updating to PROCESSING with fresh timestamp

@@ -270,7 +270,8 @@ class EffectLedger(Generic[TxT]):
                 await self.request_approval(effect.idem_key, tx)
 
                 resolved = await self._wait_for_terminal(effect.idem_key, merged, tx)
-                return await self._execute_handler(resolved, handler, tx)
+                # Must claim before executing - multiple waiters may have woken up
+                return await self._handle_resolved_effect(resolved, handler, merged, tx)
 
             return await self._execute_handler(effect, handler, tx)
 
@@ -289,24 +290,14 @@ class EffectLedger(Generic[TxT]):
 
         if effect.status == EffectStatus.PROCESSING:
             if _is_effect_stale(effect, merged.stale.after_ms):
-                claimed = await self._store.claim_for_processing(
-                    effect.id,
+                return await self._claim_and_execute(
+                    effect,
                     EffectStatus.PROCESSING,
+                    handler,
+                    merged,
+                    tx,
                     stale_threshold_ms=merged.stale.after_ms,
-                    tx=tx,
                 )
-
-                if not claimed:
-                    # Someone else claimed it, wait for their result
-                    resolved = await self._wait_for_terminal(
-                        effect.idem_key, merged, tx
-                    )
-
-                    return await self._handle_resolved_effect(
-                        resolved, handler, merged, tx
-                    )
-
-                return await self._execute_handler(effect, handler, tx)
 
             resolved = await self._wait_for_terminal(effect.idem_key, merged, tx)
             return await self._handle_resolved_effect(resolved, handler, merged, tx)
@@ -316,18 +307,9 @@ class EffectLedger(Generic[TxT]):
             return await self._handle_resolved_effect(resolved, handler, merged, tx)
 
         if effect.status == EffectStatus.READY:
-            claimed = await self._store.claim_for_processing(
-                effect.id,
-                EffectStatus.READY,
-                tx=tx,
+            return await self._claim_and_execute(
+                effect, EffectStatus.READY, handler, merged, tx
             )
-
-            if not claimed:
-                # Someone else claimed it, wait for their result
-                resolved = await self._wait_for_terminal(effect.idem_key, merged, tx)
-                return await self._handle_resolved_effect(resolved, handler, merged, tx)
-
-            return await self._execute_handler(effect, handler, tx)
 
         if effect.status in (EffectStatus.DENIED, EffectStatus.CANCELED):
             raise EffectDeniedError(
@@ -351,6 +333,61 @@ class EffectLedger(Generic[TxT]):
             f"Effect {effect.idem_key} in unexpected state: {effect.status}"
         )
 
+    async def _claim_and_execute(
+        self,
+        effect: Effect,
+        from_status: EffectStatus,
+        handler: Callable[[Effect], Coroutine[Any, Any, Any]],
+        merged: MergedOptions,
+        tx: TxT | None = None,
+        stale_threshold_ms: int | None = None,
+    ) -> Any:
+        """Atomically claim an effect and execute the handler.
+
+        If claim fails, waits for the winner to complete and returns their result.
+        This ensures exactly-once execution semantics.
+        """
+        claimed = await self._store.claim_for_processing(
+            effect.id,
+            from_status,
+            stale_threshold_ms=stale_threshold_ms,
+            tx=tx,
+        )
+
+        if not claimed:
+            # Someone else got it, wait for their result
+            resolved = await self._wait_for_terminal(effect.idem_key, merged, tx)
+
+            # If terminal, return result directly
+            if is_terminal_status(resolved.status):
+                return self._return_terminal_result(resolved)
+
+            # Otherwise (READY or stale PROCESSING), handle recursively
+            return await self._handle_resolved_effect(resolved, handler, merged, tx)
+
+        return await self._execute_handler(effect, handler, tx)
+
+    def _return_terminal_result(self, effect: Effect) -> Any:
+        """Extract result from a terminal effect, raising appropriate errors."""
+        if effect.status == EffectStatus.SUCCEEDED:
+            return effect.result
+
+        if effect.status == EffectStatus.FAILED and effect.error:
+            raise EffectFailedError(
+                effect.idem_key,
+                {"code": effect.error.code, "message": effect.error.message},
+            )
+
+        if effect.status in (EffectStatus.DENIED, EffectStatus.CANCELED):
+            raise EffectDeniedError(
+                effect.idem_key,
+                effect.error.message if effect.error else None,
+            )
+
+        raise RuntimeError(
+            f"Effect {effect.idem_key} in unexpected terminal state: {effect.status}"
+        )
+
     async def _handle_resolved_effect(
         self,
         effect: Effect,
@@ -358,6 +395,7 @@ class EffectLedger(Generic[TxT]):
         merged: MergedOptions,
         tx: TxT | None = None,
     ) -> Any:
+        """Handle an effect that has resolved from waiting (terminal, READY, or stale)."""
         if effect.status == EffectStatus.FAILED and effect.error:
             raise EffectFailedError(
                 effect.idem_key,
@@ -374,55 +412,19 @@ class EffectLedger(Generic[TxT]):
             return effect.result
 
         if effect.status == EffectStatus.READY:
-            claimed = await self._store.claim_for_processing(
-                effect.id,
-                EffectStatus.READY,
-                tx=tx,
+            return await self._claim_and_execute(
+                effect, EffectStatus.READY, handler, merged, tx
             )
-            if not claimed:
-                # Someone else got it, re-fetch and handle
-                updated = await self._store.find_by_idem_key(effect.idem_key, tx)
-                if updated and is_terminal_status(updated.status):
-                    if updated.status == EffectStatus.SUCCEEDED:
-                        return updated.result
-                    if updated.status == EffectStatus.FAILED and updated.error:
-                        raise EffectFailedError(
-                            updated.idem_key,
-                            {
-                                "code": updated.error.code,
-                                "message": updated.error.message,
-                            },
-                        )
-                raise RuntimeError(
-                    f"Effect {effect.idem_key} claim failed, unexpected state"
-                )
-            return await self._execute_handler(effect, handler, tx)
 
         if _is_effect_stale(effect, merged.stale.after_ms):
-            claimed = await self._store.claim_for_processing(
-                effect.id,
+            return await self._claim_and_execute(
+                effect,
                 EffectStatus.PROCESSING,
+                handler,
+                merged,
+                tx,
                 stale_threshold_ms=merged.stale.after_ms,
-                tx=tx,
             )
-            if not claimed:
-                # Someone else got it, re-fetch and handle
-                updated = await self._store.find_by_idem_key(effect.idem_key, tx)
-                if updated and is_terminal_status(updated.status):
-                    if updated.status == EffectStatus.SUCCEEDED:
-                        return updated.result
-                    if updated.status == EffectStatus.FAILED and updated.error:
-                        raise EffectFailedError(
-                            updated.idem_key,
-                            {
-                                "code": updated.error.code,
-                                "message": updated.error.message,
-                            },
-                        )
-                raise RuntimeError(
-                    f"Effect {effect.idem_key} claim failed, unexpected state"
-                )
-            return await self._execute_handler(effect, handler, tx)
 
         raise RuntimeError(
             f"Effect {effect.idem_key} in unexpected state: {effect.status}"
@@ -440,7 +442,7 @@ class EffectLedger(Generic[TxT]):
             current = await self._store.find_by_idem_key(effect.idem_key, tx)
             from_status = current.status if current else effect.status
 
-            await self._store.transition(
+            committed = await self._store.transition(
                 effect.id,
                 from_status,
                 EffectStatus.SUCCEEDED,
@@ -448,8 +450,28 @@ class EffectLedger(Generic[TxT]):
                 tx=tx,
             )
 
+            if not committed:
+                # Lost the race - someone else modified the effect (stale takeover, deny, etc.)
+                # Re-fetch and return the actual terminal result
+                final = await self._store.find_by_idem_key(effect.idem_key, tx)
+                if final is None:
+                    raise RuntimeError(
+                        f"Effect {effect.idem_key} disappeared during commit"
+                    )
+
+                if is_terminal_status(final.status):
+                    return self._return_terminal_result(final)
+
+                raise RuntimeError(
+                    f"Effect {effect.idem_key} commit failed, status is {final.status}"
+                )
+
             return result
         except Exception as err:
+            # Don't wrap our own errors
+            if isinstance(err, (EffectFailedError, EffectDeniedError)):
+                raise
+
             error = {
                 "code": getattr(err, "code", None),
                 "message": str(err),
@@ -458,13 +480,22 @@ class EffectLedger(Generic[TxT]):
             current = await self._store.find_by_idem_key(effect.idem_key, tx)
             from_status = current.status if current else effect.status
 
-            await self._store.transition(
+            committed = await self._store.transition(
                 effect.id,
                 from_status,
                 EffectStatus.FAILED,
                 error=error,
                 tx=tx,
             )
+
+            if not committed:
+                # Lost the race - someone else modified the effect
+                # Re-fetch to see actual state, but still raise the original error
+                final = await self._store.find_by_idem_key(effect.idem_key, tx)
+                if final and is_terminal_status(final.status):
+                    # Another worker completed it - return their result instead of raising
+                    return self._return_terminal_result(final)
+                # Otherwise, just raise the original error
 
             raise
 

@@ -32,3 +32,4 @@ htmlcov/
 *.swo
 *~
 .DS_Store
+coverage.*
