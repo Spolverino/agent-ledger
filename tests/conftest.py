@@ -34,9 +34,9 @@ class TestableStore(Protocol):
     ) -> bool: ...
 
 
-def _get_first_effect_idem_key(store: Any) -> str | None:
+async def _get_first_effect_idem_key(store: Any) -> str | None:
     if hasattr(store, "list_effects"):
-        effects = store.list_effects()
+        effects = await store.list_effects()
         return effects[0].idem_key if effects else None
     return None
 

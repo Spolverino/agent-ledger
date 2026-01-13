@@ -296,7 +296,7 @@ class MemoryStore:
         self._cache.clear()
         self._idem_key_to_id.clear()
 
-    def list_effects(self) -> list[Effect]:
+    async def list_effects(self) -> list[Effect]:
         return list(self._cache.values())
 
     @property

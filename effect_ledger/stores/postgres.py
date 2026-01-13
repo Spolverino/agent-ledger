@@ -337,6 +337,50 @@ class PostgresStore:
                 details={"from_status": from_status.value},
             ) from err
 
+    async def list_effects(
+        self,
+        tx: AsyncConnection[DictRow] | None = None,
+    ) -> list[Effect]:
+        query = f"SELECT * FROM {TABLE_NAME} ORDER BY created_at DESC"
+
+        try:
+            async with (
+                self._get_conn(tx) as conn,
+                conn.cursor(row_factory=dict_row) as cur,
+            ):
+                await cur.execute(query)
+                rows = await cur.fetchall()
+                return [self._row_to_effect(dict(row)) for row in rows]
+        except EffectStoreError:
+            raise
+        except Exception as err:
+            raise EffectStoreError(
+                f"Failed to list effects: {err}",
+                operation="list_effects",
+            ) from err
+
+    async def count(
+        self,
+        tx: AsyncConnection[DictRow] | None = None,
+    ) -> int:
+        query = f"SELECT COUNT(*) as cnt FROM {TABLE_NAME}"
+
+        try:
+            async with (
+                self._get_conn(tx) as conn,
+                conn.cursor(row_factory=dict_row) as cur,
+            ):
+                await cur.execute(query)
+                row = await cur.fetchone()
+                return int(row["cnt"]) if row else 0
+        except EffectStoreError:
+            raise
+        except Exception as err:
+            raise EffectStoreError(
+                f"Failed to count effects: {err}",
+                operation="count",
+            ) from err
+
     def _row_to_effect(self, row: dict[str, Any]) -> Effect:
         error_data = row.get("error")
         result_data = row.get("result")

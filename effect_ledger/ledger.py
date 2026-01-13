@@ -382,10 +382,7 @@ class EffectLedger(Generic[TxT]):
                             },
                         )
 
-                    if begin_result.cached_result is not None:
-                        return begin_result.cached_result
-
-                    if effect.result is not None:
+                    if effect.status == EffectStatus.SUCCEEDED:
                         return effect.result
 
                 if effect.status == EffectStatus.PROCESSING:
@@ -437,11 +434,11 @@ class EffectLedger(Generic[TxT]):
                             },
                         )
 
-                    if effect.result is not None:
+                    if effect.status == EffectStatus.SUCCEEDED:
                         return effect.result
 
                     raise EffectLedgerInvariantError(
-                        f"Effect {effect.id} is terminal but has no result"
+                        f"Effect {effect.id} is terminal but not succeeded/failed"
                     )
 
                 raise EffectLedgerInvariantError(

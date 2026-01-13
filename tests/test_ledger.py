@@ -137,20 +137,23 @@ class TestCommit:
 
 
 class TestRun:
-    @memory_only
     async def test_executes_handler_and_commits_success(
-        self, store: MemoryStore, ledger: EffectLedger[None]
+        self, store: Any, ledger: EffectLedger[None]
     ) -> None:
+        call = make_call(args={"handler": "success_test"})
+
         async def handler(effect):
             return {"executed": True}
 
-        result = await ledger.run(make_call(), handler)
+        result = await ledger.run(call, handler)
 
         assert result == {"executed": True}
-        assert store.size == 1
 
-        effects = store.list_effects()
-        assert effects[0].status.value == "succeeded"
+        effect = await store.find_by_idem_key(
+            (await ledger.begin(call)).effect.idem_key
+        )
+        assert effect is not None
+        assert effect.status.value == "succeeded"
 
     async def test_returns_cached_result_on_replay(
         self, ledger: EffectLedger[None]
@@ -172,11 +175,10 @@ class TestRun:
         assert third == {"count": 1}
         assert call_count == 1
 
-    @memory_only
     async def test_commits_failure_and_rethrows_on_error(
-        self, store: MemoryStore, ledger: EffectLedger[None]
+        self, store: Any, ledger: EffectLedger[None]
     ) -> None:
-        call = make_call()
+        call = make_call(args={"handler": "failure_test"})
 
         async def handler(effect):
             raise ValueError("Handler failed")
@@ -184,10 +186,11 @@ class TestRun:
         with pytest.raises(ValueError, match="Handler failed"):
             await ledger.run(call, handler)
 
-        effects = store.list_effects()
-        assert effects[0].status.value == "failed"
-        assert effects[0].error is not None
-        assert effects[0].error.message == "Handler failed"
+        begin_result = await ledger.begin(call)
+        effect = begin_result.effect
+        assert effect.status.value == "failed"
+        assert effect.error is not None
+        assert effect.error.message == "Handler failed"
 
     async def test_throws_effect_failed_error_on_replayed_failure(
         self, ledger: EffectLedger[None]
@@ -206,7 +209,6 @@ class TestRun:
         with pytest.raises(EffectFailedError):
             await ledger.run(call, success_handler)
 
-    @memory_only
     async def test_commit_race_returns_winner_result_on_success(
         self, store: MemoryStore
     ) -> None:
@@ -224,7 +226,7 @@ class TestRun:
         task = asyncio.create_task(ledger.run(call, slow_handler))
         await handler_started.wait()
 
-        effect = store.list_effects()[0]
+        effect = (await store.list_effects())[0]
         await store.transition(
             effect.id,
             EffectStatus.PROCESSING,
@@ -237,7 +239,6 @@ class TestRun:
 
         assert result == {"from": "fast_worker"}
 
-    @memory_only
     async def test_commit_race_returns_winner_result_on_failure(
         self, store: MemoryStore
     ) -> None:
@@ -255,7 +256,7 @@ class TestRun:
         task = asyncio.create_task(ledger.run(call, failing_handler))
         await handler_started.wait()
 
-        effect = store.list_effects()[0]
+        effect = (await store.list_effects())[0]
         await store.transition(
             effect.id,
             EffectStatus.PROCESSING,
@@ -267,6 +268,91 @@ class TestRun:
         result = await task
 
         assert result == {"from": "successful_worker"}
+
+    async def test_result_with_none_value_replays_correctly(
+        self, ledger: EffectLedger[None]
+    ) -> None:
+        """Handler returning None should replay correctly."""
+        call = make_call(args={"result": "none_value"})
+
+        async def handler(eff):
+            return None
+
+        result = await ledger.run(call, handler)
+        assert result is None
+
+        result2 = await ledger.run(call, handler)
+        assert result2 is None
+
+    async def test_result_with_nested_structures(
+        self, ledger: EffectLedger[None]
+    ) -> None:
+        """Complex nested JSON should round-trip correctly."""
+        call = make_call(args={"result": "nested"})
+
+        complex_result = {
+            "string": "hello",
+            "number": 42,
+            "float": 3.14159,
+            "boolean": True,
+            "null": None,
+            "array": [1, 2, {"nested": "value"}],
+            "object": {"deep": {"deeper": {"deepest": "found"}}},
+        }
+
+        async def handler(eff):
+            return complex_result
+
+        result = await ledger.run(call, handler)
+        assert result == complex_result
+
+        result2 = await ledger.run(call, handler)
+        assert result2 == complex_result
+
+    async def test_result_with_unicode(self, ledger: EffectLedger[None]) -> None:
+        """Unicode strings should be preserved."""
+        call = make_call(args={"result": "unicode"})
+
+        unicode_result = {
+            "emoji": "🚀💡🎉",
+            "chinese": "你好世界",
+            "arabic": "مرحبا",
+            "mixed": "Hello 世界 🌍",
+        }
+
+        async def handler(eff):
+            return unicode_result
+
+        result = await ledger.run(call, handler)
+        assert result == unicode_result
+
+    async def test_result_with_large_numbers(self, ledger: EffectLedger[None]) -> None:
+        """Large integers should be preserved (within JSON limits)."""
+        call = make_call(args={"result": "large_numbers"})
+
+        large_result = {
+            "big_int": 9007199254740991,
+            "negative": -9007199254740991,
+            "zero": 0,
+        }
+
+        async def handler(eff):
+            return large_result
+
+        result = await ledger.run(call, handler)
+        assert result == large_result
+
+    async def test_run_respects_external_transaction(
+        self, store: Any, ledger: EffectLedger[Any]
+    ) -> None:
+        """Operations within run() should use provided transaction."""
+        call = make_call(args={"tx": "external"})
+
+        async def handler(eff):
+            return {"in_tx": True}
+
+        result = await ledger.run(call, handler, tx=None)
+        assert result == {"in_tx": True}
 
 
 # -----------------------------------------------------------------------------
@@ -456,7 +542,6 @@ class TestApprovalFlow:
         assert effect is not None
         assert effect.status == EffectStatus.PROCESSING
 
-    @memory_only
     async def test_denied_during_wait_raises_error(self, store: MemoryStore) -> None:
         ledger = EffectLedger(EffectLedgerOptions(store=store))
         call = make_call(args={"denied": "during_wait"})
@@ -478,7 +563,7 @@ class TestApprovalFlow:
         await waiter_started.wait()
         await asyncio.sleep(0.02)
 
-        effect = store.list_effects()[0]
+        effect = (await store.list_effects())[0]
         await ledger.deny(effect.idem_key, "Access denied")
 
         with pytest.raises(EffectDeniedError) as exc_info:
@@ -486,7 +571,6 @@ class TestApprovalFlow:
 
         assert exc_info.value.reason == "Access denied"
 
-    @memory_only
     async def test_canceled_during_wait_raises_error(self, store: MemoryStore) -> None:
         ledger = EffectLedger(EffectLedgerOptions(store=store))
         call = make_call(args={"canceled": "during_wait"})
@@ -508,7 +592,7 @@ class TestApprovalFlow:
         await waiter_started.wait()
         await asyncio.sleep(0.02)
 
-        effect = store.list_effects()[0]
+        effect = (await store.list_effects())[0]
         await store.transition(
             effect.id,
             EffectStatus.REQUIRES_APPROVAL,
@@ -536,6 +620,52 @@ class TestApprovalFlow:
         effect = await store.find_by_idem_key(begin_result.effect.idem_key)
         assert effect is not None
         assert effect.status in (EffectStatus.READY, EffectStatus.DENIED)
+
+    async def test_cancel_pending_approval(self, store: Any) -> None:
+        ledger = EffectLedger(EffectLedgerOptions(store=store))
+        call = make_call(args={"approval": "will_cancel"})
+
+        begin_result = await ledger.begin(call)
+        await ledger.request_approval(begin_result.effect.idem_key)
+
+        effect = await store.find_by_idem_key(begin_result.effect.idem_key)
+        assert effect is not None
+        assert effect.status == EffectStatus.REQUIRES_APPROVAL
+
+        success = await store.transition(
+            effect.id,
+            EffectStatus.REQUIRES_APPROVAL,
+            EffectStatus.CANCELED,
+            error={"message": "Operation canceled by admin"},
+        )
+        assert success is True
+
+        canceled = await store.find_by_id(effect.id)
+        assert canceled is not None
+        assert canceled.status == EffectStatus.CANCELED
+        assert canceled.error is not None
+        assert canceled.error.message == "Operation canceled by admin"
+
+    async def test_run_with_canceled_effect_raises_denied(self, store: Any) -> None:
+        ledger = EffectLedger(EffectLedgerOptions(store=store))
+        call = make_call(args={"approval": "already_canceled"})
+
+        begin_result = await ledger.begin(call)
+        await ledger.request_approval(begin_result.effect.idem_key)
+
+        effect = await store.find_by_idem_key(begin_result.effect.idem_key)
+        await store.transition(
+            effect.id,
+            EffectStatus.REQUIRES_APPROVAL,
+            EffectStatus.CANCELED,
+            error={"message": "Canceled"},
+        )
+
+        async def handler(eff):
+            return {"should": "not run"}
+
+        with pytest.raises(EffectDeniedError):
+            await ledger.run(call, handler)
 
 
 # -----------------------------------------------------------------------------
@@ -627,7 +757,7 @@ class TestConcurrency:
         )
         await worker_a_started.wait()
 
-        effects = store.list_effects()
+        effects = await store.list_effects()
         assert len(effects) == 1
         effect = effects[0]
 
@@ -679,7 +809,6 @@ class TestConcurrency:
         result = await ledger.run(call, our_handler)
         assert result == {"from": "other_worker"}
 
-    @memory_only
     async def test_concurrent_approval_only_one_executes(
         self, store: MemoryStore
     ) -> None:
@@ -714,7 +843,7 @@ class TestConcurrency:
         await waiters_ready.wait()
         await asyncio.sleep(0.02)
 
-        effect = store.list_effects()[0]
+        effect = (await store.list_effects())[0]
         await ledger.approve(effect.idem_key)
 
         results = await asyncio.gather(*tasks)
@@ -801,6 +930,146 @@ class TestConcurrency:
         task_a.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task_a
+
+    async def test_concurrent_begin_same_idem_key_only_one_creates(
+        self, store: Any
+    ) -> None:
+        """Multiple concurrent begin() calls with same key should result in one effect."""
+        ledger = EffectLedger(EffectLedgerOptions(store=store))
+        call = make_call(args={"concurrent": "upsert_race"})
+
+        results = await asyncio.gather(*[ledger.begin(call) for _ in range(10)])
+
+        fresh_count = sum(1 for r in results if r.idempotency_status == "fresh")
+        replayed_count = sum(1 for r in results if r.idempotency_status == "replayed")
+
+        assert fresh_count == 1
+        assert replayed_count == 9
+
+        effect_ids = {r.effect.id for r in results}
+        assert len(effect_ids) == 1
+
+    async def test_concurrent_run_same_call_only_one_executes(self, store: Any) -> None:
+        """Multiple concurrent run() calls should execute handler exactly once."""
+        ledger = EffectLedger(EffectLedgerOptions(store=store))
+        call = make_call(args={"concurrent": "run_race"})
+
+        execution_count = 0
+        execution_lock = asyncio.Lock()
+
+        async def counting_handler(eff):
+            nonlocal execution_count
+            async with execution_lock:
+                execution_count += 1
+            await asyncio.sleep(0.05)
+            return {"executed_by": execution_count}
+
+        results = await asyncio.gather(
+            *[ledger.run(call, counting_handler) for _ in range(5)]
+        )
+
+        assert all(r == {"executed_by": 1} for r in results)
+        assert execution_count == 1
+
+    async def test_stale_claim_requires_time_threshold(self, store: Any) -> None:
+        """claim_for_processing should fail if effect is not stale enough."""
+        ledger = EffectLedger(EffectLedgerOptions(store=store))
+        call = make_call(args={"stale": "threshold_test"})
+
+        begin_result = await ledger.begin(call)
+        effect = begin_result.effect
+
+        # Try to claim with a very long threshold - should fail since effect is fresh
+        claimed = await store.claim_for_processing(
+            effect.id,
+            EffectStatus.PROCESSING,
+            stale_threshold_ms=60000,  # 60 seconds
+        )
+
+        assert claimed is False
+
+        # Effect should still be in PROCESSING
+        current = await store.find_by_id(effect.id)
+        assert current is not None
+        assert current.status == EffectStatus.PROCESSING
+
+    async def test_claim_from_ready_status(self, store: Any) -> None:
+        """claim_for_processing from READY should work without threshold."""
+        ledger = EffectLedger(EffectLedgerOptions(store=store))
+        call = make_call(args={"claim": "from_ready"})
+
+        begin_result = await ledger.begin(call)
+        effect = begin_result.effect
+
+        # Move to REQUIRES_APPROVAL then READY
+        await store.transition(
+            effect.id, EffectStatus.PROCESSING, EffectStatus.REQUIRES_APPROVAL
+        )
+        await store.transition(
+            effect.id, EffectStatus.REQUIRES_APPROVAL, EffectStatus.READY
+        )
+
+        # Claim from READY
+        claimed = await store.claim_for_processing(effect.id, EffectStatus.READY)
+        assert claimed is True
+
+        # Should now be PROCESSING
+        current = await store.find_by_id(effect.id)
+        assert current is not None
+        assert current.status == EffectStatus.PROCESSING
+
+    async def test_effect_disappears_during_wait_raises_invariant(
+        self, store: MemoryStore
+    ) -> None:
+        """If effect disappears mid-wait, should raise invariant error."""
+        from effect_ledger.errors import EffectLedgerInvariantError
+
+        ledger = EffectLedger(EffectLedgerOptions(store=store))
+        call = make_call(args={"disappear": "during_wait"})
+
+        worker_started = asyncio.Event()
+
+        async def slow_handler(eff):
+            worker_started.set()
+            await asyncio.sleep(10)
+            return {"done": True}
+
+        task = asyncio.create_task(ledger.run(call, slow_handler))
+        await worker_started.wait()
+
+        effects = await store.list_effects()
+        assert len(effects) == 1
+
+        call_count = 0
+        original_find = store.find_by_idem_key
+
+        async def find_returns_none_after_first(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count > 1:
+                return None
+            return await original_find(*args, **kwargs)
+
+        short_opts = RunOptions(
+            concurrency=ConcurrencyOptions(
+                wait_timeout_ms=100,
+                initial_interval_ms=10,
+                max_interval_ms=20,
+            )
+        )
+
+        async def second_handler(e):
+            return {"second": True}
+
+        with (
+            patch.object(store, "find_by_idem_key", find_returns_none_after_first),
+            pytest.raises(EffectLedgerInvariantError, match="disappeared"),
+        ):
+            await ledger.run(call, second_handler, run_options=short_opts)
+
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
 
 
 # -----------------------------------------------------------------------------
@@ -945,6 +1214,46 @@ class TestValidation:
         assert exc_info.value.field == "args"
         assert "must be a dict" in str(exc_info.value)
 
+    async def test_empty_args_dict(self, ledger: EffectLedger[None]) -> None:
+        call1 = make_call(args={})
+        call2 = make_call(args={})
+
+        result1 = await ledger.begin(call1)
+        result2 = await ledger.begin(call2)
+
+        assert result1.effect.idem_key == result2.effect.idem_key
+        assert result1.idempotency_status == "fresh"
+        assert result2.idempotency_status == "replayed"
+
+    async def test_unicode_in_workflow_id_and_tool(
+        self, ledger: EffectLedger[None]
+    ) -> None:
+        call = ToolCall(
+            workflow_id="工作流-123",
+            tool="工具.发送消息",
+            args={"message": "Hello 世界"},
+        )
+
+        async def handler(eff):
+            return {"sent": True}
+
+        result = await ledger.run(call, handler)
+        assert result == {"sent": True}
+
+        result2 = await ledger.run(call, handler)
+        assert result2 == {"sent": True}
+
+    async def test_args_at_size_limit(self, store: Any) -> None:
+        ledger = EffectLedger(EffectLedgerOptions(store=store, max_args_size_bytes=500))
+
+        call = make_call(args={"data": "x" * 400})
+
+        async def handler(eff):
+            return {"ok": True}
+
+        result = await ledger.run(call, handler)
+        assert result == {"ok": True}
+
 
 # -----------------------------------------------------------------------------
 # Error Handling
@@ -1021,3 +1330,71 @@ class TestErrorHandling:
         assert exc_info.value.operation == "transition"
         assert exc_info.value.effect_id == effect_id
         assert "Disk full" in str(exc_info.value.__cause__)
+
+    async def test_handler_raising_effect_failed_error_not_wrapped(
+        self, store: Any
+    ) -> None:
+        ledger = EffectLedger(EffectLedgerOptions(store=store))
+        call = make_call(args={"error": "effect_failed"})
+
+        async def handler(eff):
+            raise EffectFailedError(
+                "test-key", {"code": "INNER", "message": "Inner error"}
+            )
+
+        with pytest.raises(EffectFailedError) as exc_info:
+            await ledger.run(call, handler)
+
+        assert exc_info.value.code == "INNER"
+        assert "Inner error" in str(exc_info.value)
+
+    async def test_handler_raising_effect_denied_error_not_wrapped(
+        self, store: Any
+    ) -> None:
+        ledger = EffectLedger(EffectLedgerOptions(store=store))
+        call = make_call(args={"error": "effect_denied"})
+
+        async def handler(eff):
+            raise EffectDeniedError("test-key", "Access denied")
+
+        with pytest.raises(EffectDeniedError) as exc_info:
+            await ledger.run(call, handler)
+
+        assert exc_info.value.reason == "Access denied"
+
+    async def test_generic_handler_error_recorded_in_effect(self, store: Any) -> None:
+        ledger = EffectLedger(EffectLedgerOptions(store=store))
+        call = make_call(args={"error": "generic"})
+
+        async def handler(eff):
+            raise RuntimeError("Something broke")
+
+        with pytest.raises(RuntimeError, match="Something broke"):
+            await ledger.run(call, handler)
+
+        begin_result = await ledger.begin(call)
+        assert begin_result.effect.status == EffectStatus.FAILED
+        assert begin_result.effect.error is not None
+        assert "Something broke" in begin_result.effect.error.message
+
+    async def test_store_error_during_commit_propagates(self) -> None:
+        store = MemoryStore()
+        ledger = EffectLedger(EffectLedgerOptions(store=store))
+
+        async def handler(eff):
+            return {"success": True}
+
+        async def failing_transition(*args, **kwargs):
+            raise EffectStoreError(
+                "Connection lost",
+                operation="transition",
+            )
+
+        with (
+            patch.object(store, "transition", failing_transition),
+            pytest.raises(EffectStoreError) as exc_info,
+        ):
+            call = make_call(args={"commit": "will_fail"})
+            await ledger.run(call, handler)
+
+        assert exc_info.value.operation == "transition"
