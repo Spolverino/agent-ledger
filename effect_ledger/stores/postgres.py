@@ -62,14 +62,16 @@ class PostgresStore:
         query = f"SELECT * FROM {TABLE_NAME} WHERE idem_key = %s LIMIT 1"
 
         try:
-            async with self._get_conn(tx) as conn:
-                async with conn.cursor(row_factory=dict_row) as cur:
-                    await cur.execute(query, (idem_key,))
-                    row = await cur.fetchone()
+            async with (
+                self._get_conn(tx) as conn,
+                conn.cursor(row_factory=dict_row) as cur,
+            ):
+                await cur.execute(query, (idem_key,))
+                row = await cur.fetchone()
 
-                    if row is None:
-                        return None
-                    return self._row_to_effect(dict(row))
+                if row is None:
+                    return None
+                return self._row_to_effect(dict(row))
         except EffectStoreError:
             raise
         except Exception as err:
@@ -87,15 +89,17 @@ class PostgresStore:
         query = f"SELECT * FROM {TABLE_NAME} WHERE id = %s LIMIT 1"
 
         try:
-            async with self._get_conn(tx) as conn:
-                async with conn.cursor(row_factory=dict_row) as cur:
-                    await cur.execute(query, (effect_id,))
-                    row = await cur.fetchone()
+            async with (
+                self._get_conn(tx) as conn,
+                conn.cursor(row_factory=dict_row) as cur,
+            ):
+                await cur.execute(query, (effect_id,))
+                row = await cur.fetchone()
 
-                    if row is None:
-                        return None
+                if row is None:
+                    return None
 
-                    return self._row_to_effect(dict(row))
+                return self._row_to_effect(dict(row))
         except EffectStoreError:
             raise
         except Exception as err:
@@ -150,50 +154,52 @@ class PostgresStore:
         """
 
         try:
-            async with self._get_conn(tx) as conn:
-                async with conn.cursor(row_factory=dict_row) as cur:
-                    await cur.execute(
-                        query,
-                        (
-                            effect_id,
-                            input_data.idem_key,
-                            input_data.workflow_id,
-                            input_data.call_id,
-                            input_data.tool,
-                            input_data.status.value,
-                            input_data.args_canonical,
-                            input_data.resource_id_canonical,
-                            json.dumps(input_data.result)
-                            if input_data.result is not None
-                            else None,
-                            json.dumps(
-                                {
-                                    "message": input_data.error.message,
-                                    "code": input_data.error.code,
-                                }
-                            )
-                            if input_data.error
-                            else None,
-                            now,
-                            now,
-                            now if is_terminal_status(input_data.status) else None,
-                        ),
-                    )
-
-                    row = await cur.fetchone()
-                    if row is None:
-                        raise EffectLedgerInvariantError(
-                            "Upsert RETURNING clause returned no rows"
+            async with (
+                self._get_conn(tx) as conn,
+                conn.cursor(row_factory=dict_row) as cur,
+            ):
+                await cur.execute(
+                    query,
+                    (
+                        effect_id,
+                        input_data.idem_key,
+                        input_data.workflow_id,
+                        input_data.call_id,
+                        input_data.tool,
+                        input_data.status.value,
+                        input_data.args_canonical,
+                        input_data.resource_id_canonical,
+                        json.dumps(input_data.result)
+                        if input_data.result is not None
+                        else None,
+                        json.dumps(
+                            {
+                                "message": input_data.error.message,
+                                "code": input_data.error.code,
+                            }
                         )
+                        if input_data.error
+                        else None,
+                        now,
+                        now,
+                        now if is_terminal_status(input_data.status) else None,
+                    ),
+                )
 
-                    row_dict = dict(row)
-                    created = row_dict.pop("created", False)
-                    created = created is True or created == "t"
-
-                    return UpsertEffectResult(
-                        effect=self._row_to_effect(row_dict),
-                        created=created,
+                row = await cur.fetchone()
+                if row is None:
+                    raise EffectLedgerInvariantError(
+                        "Upsert RETURNING clause returned no rows"
                     )
+
+                row_dict = dict(row)
+                created = row_dict.pop("created", False)
+                created = created is True or created == "t"
+
+                return UpsertEffectResult(
+                    effect=self._row_to_effect(row_dict),
+                    created=created,
+                )
         except (EffectStoreError, EffectLedgerInvariantError):
             raise
         except Exception as err:
@@ -224,23 +230,25 @@ class PostgresStore:
         """
 
         try:
-            async with self._get_conn(tx) as conn:
-                async with conn.cursor(row_factory=dict_row) as cur:
-                    await cur.execute(
-                        query,
-                        (
-                            to_status.value,
-                            json.dumps(result) if result is not None else None,
-                            json.dumps(error) if error else None,
-                            now,
-                            is_terminal_status(to_status),
-                            now,
-                            effect_id,
-                            from_status.value,
-                        ),
-                    )
+            async with (
+                self._get_conn(tx) as conn,
+                conn.cursor(row_factory=dict_row) as cur,
+            ):
+                await cur.execute(
+                    query,
+                    (
+                        to_status.value,
+                        json.dumps(result) if result is not None else None,
+                        json.dumps(error) if error else None,
+                        now,
+                        is_terminal_status(to_status),
+                        now,
+                        effect_id,
+                        from_status.value,
+                    ),
+                )
 
-                    return bool(cur.rowcount == 1)
+                return bool(cur.rowcount == 1)
         except EffectStoreError:
             raise
         except Exception as err:
@@ -266,9 +274,11 @@ class PostgresStore:
         """
 
         try:
-            async with self._get_conn(tx) as conn:
-                async with conn.cursor(row_factory=dict_row) as cur:
-                    await cur.execute(query, (datetime.now(tz=timezone.utc), idem_key))
+            async with (
+                self._get_conn(tx) as conn,
+                conn.cursor(row_factory=dict_row) as cur,
+            ):
+                await cur.execute(query, (datetime.now(tz=timezone.utc), idem_key))
         except EffectStoreError:
             raise
         except Exception as err:

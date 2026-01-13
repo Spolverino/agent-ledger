@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import os
-from typing import Any, AsyncIterator, Protocol, runtime_checkable
+from collections.abc import AsyncIterator
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import pytest
 
 from effect_ledger import EffectLedger, EffectLedgerOptions, EffectStatus, MemoryStore
-from effect_ledger.types import Effect
+
+if TYPE_CHECKING:
+    from effect_ledger.types import Effect
 
 DATABASE_URL = os.environ.get(
     "DATABASE_URL",

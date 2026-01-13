@@ -12,7 +12,7 @@ try:
     _HAS_OTEL = True
 except ImportError:
     _HAS_OTEL = False
-    trace = None  # type: ignore[assignment]
+    trace = None  # type: ignore[assignment,unused-ignore]
 
 if TYPE_CHECKING:
     from effect_ledger.types import Effect, EffectStatus

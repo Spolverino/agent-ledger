@@ -593,7 +593,7 @@ class EffectLedger(Generic[TxT]):
             log_handler_error(effect.id, err)
 
             # Don't wrap our own errors
-            if isinstance(err, (EffectFailedError, EffectDeniedError)):
+            if isinstance(err, EffectFailedError | EffectDeniedError):
                 raise
 
             error = {
