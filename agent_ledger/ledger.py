@@ -5,7 +5,9 @@ import random
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Generic, TypeVar
+from typing import Annotated, Any, Generic, TypeVar
+
+from pydantic import BaseModel, ConfigDict, SkipValidation
 
 from agent_ledger.errors import (
     EffectDeniedError,
@@ -24,6 +26,7 @@ from agent_ledger.observability import (
     log_wait_timeout,
     set_context,
 )
+from agent_ledger.stores.base import EffectStore  # noqa: TC001
 from agent_ledger.types import (
     BeginResult,
     CommitOutcome,
@@ -33,6 +36,7 @@ from agent_ledger.types import (
     EffectStatus,
     LedgerDefaults,
     LedgerHooks,
+    PositiveInt,
     RunOptions,
     StaleOptions,
     ToolCall,
@@ -45,9 +49,6 @@ from agent_ledger.utils import (
     resource_id_canonical,
     validate_args,
 )
-
-if TYPE_CHECKING:
-    from agent_ledger.stores.base import EffectStore
 
 TxT = TypeVar("TxT")
 
@@ -162,11 +163,12 @@ def _is_effect_stale(effect: Effect, stale_after_ms: int) -> bool:
     return age_ms > effective_threshold
 
 
-@dataclass
-class EffectLedgerOptions(Generic[TxT]):
-    store: EffectStore[TxT]
+class EffectLedgerOptions(BaseModel, Generic[TxT]):
+    model_config = ConfigDict(frozen=True, extra="forbid", arbitrary_types_allowed=True)
+
+    store: Annotated[EffectStore[TxT], SkipValidation()]
     defaults: LedgerDefaults | None = None
-    max_args_size_bytes: int | None = None
+    max_args_size_bytes: PositiveInt | None = None
 
 
 class EffectLedger(Generic[TxT]):

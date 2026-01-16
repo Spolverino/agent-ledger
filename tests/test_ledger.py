@@ -7,6 +7,7 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
+from pydantic import ValidationError
 
 from agent_ledger import (
     ConcurrencyOptions,
@@ -1201,18 +1202,15 @@ class TestValidation:
         assert "exceed maximum size" in str(exc_info.value)
 
     async def test_rejects_non_dict_args(self, store: Any) -> None:
-        ledger = EffectLedger(EffectLedgerOptions(store=store))
-        call = ToolCall(
-            workflow_id="test",
-            tool="test.tool",
-            args=["not", "a", "dict"],  # type: ignore
-        )
+        with pytest.raises(ValidationError) as exc_info:
+            ToolCall(
+                workflow_id="test",
+                tool="test.tool",
+                args=["not", "a", "dict"],  # type: ignore
+            )
 
-        with pytest.raises(EffectLedgerValidationError) as exc_info:
-            await ledger.begin(call)
-
-        assert exc_info.value.field == "args"
-        assert "must be a dict" in str(exc_info.value)
+        assert "args" in str(exc_info.value)
+        assert "dictionary" in str(exc_info.value).lower()
 
     async def test_empty_args_dict(self, ledger: EffectLedger[None]) -> None:
         call1 = make_call(args={})

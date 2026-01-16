@@ -3,11 +3,18 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 JsonValue = str | int | float | bool | None | list[Any] | dict[str, Any]
+
+# Reusable annotated types for boundary validation
+NonEmptyStr = Annotated[str, Field(min_length=1)]
+PositiveInt = Annotated[int, Field(gt=0)]
+NonNegativeInt = Annotated[int, Field(ge=0)]
+PositiveFloat = Annotated[float, Field(gt=0)]
+UnitFloat = Annotated[float, Field(ge=0, le=1)]
 
 
 class EffectStatus(str, Enum):
@@ -79,21 +86,61 @@ def is_valid_transition(from_status: EffectStatus, to_status: EffectStatus) -> b
 IdempotencyStatus = Literal["fresh", "replayed"]
 
 
-@dataclass(frozen=True, slots=True)
-class ResourceDescriptor:
-    namespace: str
-    type: str
-    id: dict[str, Any]
+class ResourceDescriptor(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    namespace: NonEmptyStr
+    type: NonEmptyStr
+    id: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("id")
+    @classmethod
+    def validate_id_not_empty(cls, v: dict[str, Any]) -> dict[str, Any]:
+        if not v:
+            raise ValueError("id must not be empty")
+        return v
 
 
-@dataclass(frozen=True, slots=True)
-class ToolCall:
-    workflow_id: str
-    tool: str
-    args: dict[str, Any]
+class ToolCall(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    workflow_id: NonEmptyStr
+    tool: NonEmptyStr
+    args: dict[str, Any] = Field(default_factory=dict)
     call_id: str | None = None
     resource: ResourceDescriptor | None = None
     idempotency_keys: list[str] | None = None
+
+    @field_validator("call_id")
+    @classmethod
+    def validate_call_id_not_empty(cls, v: str | None) -> str | None:
+        if v is not None and len(v) == 0:
+            raise ValueError("call_id must not be empty if provided")
+        return v
+
+    @field_validator("idempotency_keys")
+    @classmethod
+    def validate_idempotency_keys_format(cls, v: list[str] | None) -> list[str] | None:
+        if v is not None:
+            if len(v) == 0:
+                raise ValueError("idempotency_keys must not be empty if provided")
+            for key in v:
+                if not key:
+                    raise ValueError("idempotency_keys must contain non-empty strings")
+            if len(set(v)) != len(v):
+                raise ValueError("idempotency_keys must not contain duplicates")
+        return v
+
+    @model_validator(mode="after")
+    def validate_idempotency_keys_exist_in_args(self) -> ToolCall:
+        if self.idempotency_keys is not None and self.resource is None:
+            missing = [k for k in self.idempotency_keys if k not in self.args]
+            if missing:
+                raise ValueError(
+                    f"idempotency_keys {missing} not found in args; "
+                    "this would result in an empty hash component"
+                )
+        return self
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,34 +209,47 @@ class UpsertEffectResult:
     created: bool
 
 
-@dataclass(frozen=True, slots=True)
-class ConcurrencyOptions:
-    wait_timeout_ms: int = 30_000
-    initial_interval_ms: int = 50
-    max_interval_ms: int = 1_000
-    backoff_multiplier: float = 1.5
-    jitter_factor: float = 0.3
+class ConcurrencyOptions(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    wait_timeout_ms: PositiveInt = 30_000
+    initial_interval_ms: PositiveInt = 50
+    max_interval_ms: PositiveInt = 1_000
+    backoff_multiplier: PositiveFloat = 1.5
+    jitter_factor: UnitFloat = 0.3
+
+    @model_validator(mode="after")
+    def validate_interval_ordering(self) -> ConcurrencyOptions:
+        if self.initial_interval_ms > self.max_interval_ms:
+            raise ValueError(
+                f"initial_interval_ms ({self.initial_interval_ms}) must be <= "
+                f"max_interval_ms ({self.max_interval_ms})"
+            )
+        return self
 
 
-@dataclass(frozen=True, slots=True)
-class StaleOptions:
-    after_ms: int = 0
+class StaleOptions(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    after_ms: NonNegativeInt = 0
 
 
-@dataclass(frozen=True, slots=True)
-class RunOptions:
+class RunOptions(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
     concurrency: ConcurrencyOptions | None = None
     stale: StaleOptions | None = None
     requires_approval: bool = False
 
 
-@dataclass(frozen=True, slots=True)
-class LedgerDefaults:
+class LedgerDefaults(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
     run: RunOptions | None = None
 
 
 class LedgerHooks(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     on_approval_required: Any | None = None
 
