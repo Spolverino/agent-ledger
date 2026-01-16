@@ -6,7 +6,7 @@ readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.10"
 authors = [
-    { name = "Rune0", email = "team@rune0.com" }
+    { name = "Rune0", email = "rune0org@gmail.com" }
 ]
 keywords = [
     "idempotency",
@@ -15,6 +15,9 @@ keywords = [
     "tool-calls",
     "audit",
     "governance",
+    "hitl",
+    "human-in-the-loop",
+    "approvals"
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -30,6 +33,7 @@ classifiers = [
 ]
 dependencies = [
     "cachetools>=5.3.0",
+    "pydantic>=2.0.0",
     "rfc8785>=0.1.2",
 ]
 

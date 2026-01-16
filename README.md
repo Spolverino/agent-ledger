@@ -1,10 +1,30 @@
-# agent-ledger
+<div align="center">
 
-Idempotency and audit ledger for AI agent tool calls.
+[![Pixel fonts](https://see.fontimg.com/api/rf5/BLAPB/YWMxYTMyY2I3MjZmNDUzN2JiZTFiODBiM2E4NjhiNGMudHRm/cnVuZTA/bitrimus.png?r=fs&h=77&w=1000&fg=000000&bg=FFFFFF&tb=1&s=77)](https://www.fontspace.com/category/pixel)
+
+<h3>
+AI agents retry. Side effects shouldn't.
+</h3>
+
+</div>
+
+---
+
+<div align="center">
+
+Idempotent tool execution for AI agents (crash-safe, multi-worker).
+Human sign-off locked to the exact tool + args (no "approve $10, run $10k").
+
+*Prevent duplicate charges. Require approval for sensitive deploys. Recorded history you can query.*
+
+**Works with any async Python tool executor.** Examples: [LangGraph](examples/) / [LangChain](examples/). (more coming)
 
 [![PyPI version](https://badge.fury.io/py/agent-ledger.svg)](https://badge.fury.io/py/agent-ledger)
+[![CI](https://github.com/rune0/agent-ledger-py/actions/workflows/ci.yml/badge.svg)](https://github.com/rune0/agent-ledger-py/actions/workflows/ci.yml)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+
+</div>
 
 ## Installation
 
@@ -21,107 +41,79 @@ pip install agent-ledger[postgres]
 import asyncio
 from agent_ledger import EffectLedger, EffectLedgerOptions, MemoryStore, ToolCall
 
+async def charge_customer(effect):
+    print(f"Charging {effect.args_canonical}...")
+    return {"status": "charged", "id": "ch_123"}
+
 async def main():
     store = MemoryStore()
     ledger = EffectLedger(EffectLedgerOptions(store=store))
 
-    # Idempotent tool execution
+    # First call: executes the handler
     result = await ledger.run(
         ToolCall(
-            workflow_id="support-ticket-123",
-            tool="slack.send_message",
-            args={"channel": "#support", "text": "Ticket resolved"},
+            workflow_id="order-123",
+            tool="stripe.charge",
+            args={"amount": 1000, "currency": "usd"},
         ),
-        handler=lambda effect: send_slack_message("#support", "Ticket resolved"),
+        handler=charge_customer,
     )
+    print(f"First call: {result}")
 
-    # If replayed: returns cached result, no duplicate message sent
+    # Second call: same inputs → returns recorded result
     result2 = await ledger.run(
         ToolCall(
-            workflow_id="support-ticket-123",
-            tool="slack.send_message",
-            args={"channel": "#support", "text": "Ticket resolved"},
+            workflow_id="order-123",
+            tool="stripe.charge",
+            args={"amount": 1000, "currency": "usd"},
         ),
-        handler=lambda effect: send_slack_message("#support", "Ticket resolved"),
+        handler=charge_customer,
     )
-
-    assert result == result2  # Same cached result
+    print(f"Second call: {result2}")
+    # Handler only executed once. No double charge.
 
 asyncio.run(main())
 ```
 
-## Features
-
-- **Idempotency**: Automatic deduplication of tool calls based on workflow ID, tool name, and arguments
-- **Audit Trail**: Every tool execution is recorded with full context
-- **Human-in-the-Loop**: Built-in approval workflow for sensitive operations
-- **Concurrent Safety**: Handles race conditions when multiple workers execute the same effect
-- **Stale Detection**: Automatic takeover of stalled effects
-- **Pluggable Storage**: MemoryStore for development, PostgresStore for production
-
-## Core Concepts
-
-### Effect
-
-An Effect represents a single execution of a tool. It tracks:
-
-- Input arguments (canonicalized)
-- Status (processing, succeeded, failed, requires_approval, etc.)
-- Result or error
-- Timing information
-- Deduplication count
-
-### Idempotency Key
-
-Computed as `SHA256(workflow_id | tool | canonical_args_or_resource)`. Same inputs = same key = same effect.
-
-### Status Flow
+**Output:**
 
 ```
-processing -> succeeded
-           -> failed
-           -> requires_approval -> ready -> succeeded/failed
-                                -> denied
-           -> canceled
+Charging {"amount":1000,"currency":"usd"}...
+First call: {'status': 'charged', 'id': 'ch_123'}
+Second call: {'status': 'charged', 'id': 'ch_123'}
 ```
 
-## Usage Examples
+Same inputs → same hash → same result. The handler only runs once.
 
-### Basic Idempotent Execution
+---
+
+## Why This Exists
+
+LLMs are non-deterministic. Your payment API isn't.
+
+When an agent crashes or retries, it doesn't remember what it already did. A timeout becomes a double charge. A retry loop becomes inbox spam. A crashed deploy leaves you guessing what actually ran.
+
+`agent-ledger` sits between your agent and the outside world:
+
+| Problem | How agent-ledger helps |
+|---------|----------------------|
+| Agent retried → customer charged twice | **Idempotency**: Same inputs → same hash → recorded result replayed, handler skipped |
+| Agent deployed without permission | **Approvals**: Sensitive tools pause until a human approves |
+| "What did the agent actually do?" | **Audit trail**: Every call recorded with inputs, outputs, timing |
+| Process crashed mid-execution | **Crash recovery**: New process reads ledger, resumes safely |
+| Two workers hit the same task | **Concurrency**: First writer wins, others wait for result |
+
+---
+
+## The "Pause Button" for Your Agent (Human-in-the-loop)
+
+High-stakes operations can require human approval before execution:
 
 ```python
-result = await ledger.run(
-    ToolCall(
-        workflow_id="order-123",
-        tool="stripe.charge",
-        args={"amount": 1000, "currency": "usd"},
-    ),
-    handler=async_stripe_charge,
-)
-```
+from agent_ledger import RunOptions, LedgerHooks
 
-### With Resource Descriptor
-
-```python
-result = await ledger.run(
-    ToolCall(
-        workflow_id="order-123",
-        tool="github.create_issue",
-        args={"title": "Bug report", "body": "Details..."},
-        resource=ResourceDescriptor(
-            namespace="github",
-            type="issue",
-            id={"owner": "acme", "repo": "app"},
-        ),
-    ),
-    handler=create_github_issue,
-)
-```
-
-### With Approval Flow
-
-```python
-from agent_ledger import RunOptions
+async def notify_slack(effect):
+    await slack.post(f"Approve {effect.tool}? Key: {effect.idem_key}")
 
 result = await ledger.run(
     ToolCall(
@@ -131,18 +123,140 @@ result = await ledger.run(
     ),
     handler=deploy_to_k8s,
     run_options=RunOptions(requires_approval=True),
+    hooks=LedgerHooks(on_approval_required=notify_slack),
 )
 
-# Elsewhere (admin panel, CLI, webhook):
-await ledger.approve(idem_key)
+# Approve from anywhere (admin panel, Slack bot, CLI):
+await ledger.approve(effect.idem_key)
 # or
-await ledger.deny(idem_key, reason="Not authorized")
+await ledger.deny(effect.idem_key, reason="Not authorized")
 ```
 
-### Manual Begin/Commit
+The agent waits. The human decides. The ledger records everything.
+
+`run()` polls until the effect is approved (with exponential backoff, default 30s timeout). After approval, the handler executes and the result is returned.
+
+The `on_approval_required` hook fires once when the approval request is created—not on retries or replays. Hook errors are logged but don't abort the run.
+
+> **Intent-bound approval**: The approval is tied to the exact payload hash. If the agent retries with different arguments, that's a *new* approval request—not a bypass of the previous one.
+
+---
+
+## With LangChain
 
 ```python
-# Fine-grained control
+from agent_ledger import EffectLedger, EffectLedgerOptions, MemoryStore, ToolCall
+
+ledger = EffectLedger(EffectLedgerOptions(store=MemoryStore()))
+
+async def send_email(to: str, subject: str, body: str) -> str:
+    # Your actual email-sending logic
+    return f"Email sent to {to}"
+
+async def execute_tool_safely(tool_name: str, args: dict, workflow_id: str):
+    """Wrap any async function with idempotency."""
+    return await ledger.run(
+        ToolCall(workflow_id=workflow_id, tool=tool_name, args=args),
+        handler=lambda _: send_email(**args),
+    )
+
+# In your agent's tool execution loop:
+result = await execute_tool_safely(
+    tool_name="send_email",
+    args={"to": "customer@example.com", "subject": "Order confirmed", "body": "..."},
+    workflow_id="order-456",
+)
+# Retries won't send duplicate emails
+```
+
+This pattern works with LangChain, LangGraph, CrewAI, or any other framework. See [`examples/`](examples/) for framework-specific integrations.
+
+---
+
+## How It Works
+
+Every tool call becomes a transaction in the ledger:
+
+```
+ToolCall(workflow_id, tool, args)
+              │
+              ▼
+    SHA256(workflow_id | tool | args) → idem_key
+              │
+              ▼
+         ┌─────────┐
+         │ LEDGER  │
+         └────┬────┘
+              │
+   ┌──────────┼──────────┐
+   │          │          │
+ fresh    in-flight   terminal
+   │          │          │
+   ▼          ▼          ▼
+execute     wait       replay
+handler   for result   recorded
+```
+
+**Effect lifecycle:**
+
+```
+processing → succeeded
+           → failed
+           → requires_approval → ready → succeeded/failed
+                               → denied
+           → canceled
+```
+
+### Design Constraints
+
+- **Exactly-once recording**: Each unique `(workflow_id, tool, args)` tuple is recorded exactly once
+- **Downstream exactly-once**: Depends on your handler being idempotent or the downstream API supporting idempotency keys
+- **Deterministic canonicalization**: Args are JSON-serialized with sorted keys; non-deterministic values (timestamps, UUIDs) in args will create new records
+
+---
+
+## More Examples
+
+### Custom Idempotency Keys
+
+Hash only specific fields—ignore the rest:
+
+```python
+await ledger.run(
+    ToolCall(
+        workflow_id="ticket-456",
+        tool="github.create_issue",
+        args={"owner": "acme", "repo": "app", "title": "Bug", "body": "Details..."},
+        idempotency_keys=["owner", "repo", "title"],  # body changes won't re-execute
+    ),
+    handler=create_issue,
+)
+```
+
+### PostgreSQL for Production
+
+Your agent's state belongs in Postgres, not ephemeral memory:
+
+```python
+from psycopg_pool import AsyncConnectionPool
+from agent_ledger.stores.postgres import PostgresStore, SCHEMA_SQL
+
+pool = AsyncConnectionPool(conninfo="postgresql://localhost/mydb")
+async with pool.connection() as conn:
+    await conn.execute(SCHEMA_SQL)
+
+store = PostgresStore(pool=pool)
+ledger = EffectLedger(EffectLedgerOptions(store=store))
+# Query your audit trail with SQL
+```
+
+### Fine-Grained Control
+
+For custom execution logic:
+
+```python
+from agent_ledger import CommitSucceeded, CommitFailed, EffectError
+
 begin_result = await ledger.begin(call)
 
 if begin_result.cached:
@@ -160,73 +274,84 @@ except Exception as e:
     raise
 ```
 
-## PostgreSQL Setup
+---
+
+## When to Use This
+
+**Good fit:**
+- Agents calling payment APIs, sending emails, creating tickets
+- Workflows requiring human-in-the-loop oversight
+- Workflows that retry on failure or resume after crashes
+- Operations requiring human sign-off before execution
+- Systems needing audit trails of what the agent did
+
+**Probably not needed:**
+- Read-only agents (RAG, summarization, search)
+- One-off scripts without retry logic
+- Prototypes where duplicates are acceptable
+
+---
+
+## Why Not...?
+
+| Alternative | What's missing |
+|-------------|----------------|
+| **Retry libraries** (Tenacity, Stamina) | Retry the call, but don't deduplicate across processes or restarts |
+| **In-memory cache** | Lost on restart, can't coordinate multiple workers |
+| **DB unique constraints** | Good start, but no lifecycle states, result caching, or approval flows |
+| **Workflow engines** (Temporal, Celery) | Full orchestration systems; `agent-ledger` is a lightweight layer you can use *inside* them |
+
+**Library-only**: no sidecar, no agent runtime, no SaaS. Bring your own store (Memory/Postgres). `pip install` and go.
+
+---
+
+## FAQ
+
+**Does this replace Temporal?**
+No. Temporal is a full workflow orchestration engine. `agent-ledger` is a lightweight idempotency layer you can use inside Temporal activities, or standalone.
+
+**Can it prevent double Stripe charges?**
+Yes—by replaying the recorded result instead of re-executing the handler. For extra safety, also pass Stripe's own `idempotency_key` in your API call.
+
+**What is `workflow_id`?**
+A scope boundary for idempotency. Same `(workflow_id, tool, args)` = same effect. Different workflow_id = independent effects, even with identical tool+args.
+
+---
+
+## Core API
+
+| Method | Purpose |
+|--------|---------|
+| `run(call, handler)` | Execute with idempotency—the main entry point |
+| `begin(call)` / `commit(id, outcome)` | Manual transaction control |
+| `approve(key)` / `deny(key)` | Human-in-the-loop approval |
+| `get_effect(id)` / `find_by_idem_key(key)` | Query ledger state |
+
+See [ledger.py](agent_ledger/ledger.py) for full API with type signatures.
+
+### Configuration
 
 ```python
-from psycopg_pool import AsyncConnectionPool
-from agent_ledger.stores.postgres import PostgresStore, SCHEMA_SQL
+from agent_ledger import RunOptions, ConcurrencyOptions, StaleOptions
 
-async def setup():
-    pool = AsyncConnectionPool(conninfo="postgresql://localhost/mydb")
-
-    # Create schema
-    async with pool.connection() as conn:
-        await conn.execute(SCHEMA_SQL)
-
-    store = PostgresStore(pool=pool)
-    ledger = EffectLedger(EffectLedgerOptions(store=store))
-    return ledger
-```
-
-## API Reference
-
-### EffectLedger
-
-| Method                             | Description                           |
-| ---------------------------------- | ------------------------------------- |
-| `run(call, handler, run_options?)` | Execute tool with idempotency         |
-| `begin(call)`                      | Start effect, returns cached or fresh |
-| `commit(effect_id, outcome)`       | Complete effect with result/error     |
-| `get_effect(effect_id)`            | Get effect by ID                      |
-| `find_by_idem_key(idem_key)`       | Get effect by idempotency key         |
-| `request_approval(idem_key)`       | Move to requires_approval             |
-| `approve(idem_key)`                | Approve and move to ready             |
-| `deny(idem_key, reason?)`          | Deny with optional reason             |
-
-### EffectStatus
-
-| Status              | Description                       |
-| ------------------- | --------------------------------- |
-| `processing`        | Currently executing               |
-| `succeeded`         | Completed successfully (terminal) |
-| `failed`            | Completed with error (terminal)   |
-| `requires_approval` | Waiting for human approval        |
-| `ready`             | Approved, ready to execute        |
-| `denied`            | Human rejected (terminal)         |
-| `canceled`          | System canceled (terminal)        |
-
-## Configuration
-
-### ConcurrencyOptions
-
-```python
-ConcurrencyOptions(
-    wait_timeout_ms=30_000,      # Max wait for concurrent effect
-    initial_interval_ms=50,      # Initial polling interval
-    max_interval_ms=1_000,       # Max polling interval
-    backoff_multiplier=1.5,      # Exponential backoff
-    jitter_factor=0.3,           # Randomization factor
+RunOptions(
+    requires_approval=False,
+    concurrency=ConcurrencyOptions(
+        wait_timeout_ms=30_000,
+        backoff_multiplier=1.5,
+    ),
+    stale=StaleOptions(
+        after_ms=60_000,  # Take over effects older than this
+    ),
 )
 ```
 
-### StaleOptions
-
-```python
-StaleOptions(
-    after_ms=60_000,  # Consider stale after 60s (0 = disabled)
-)
-```
+---
 
 ## License
 
 Apache-2.0
+
+---
+
+<sub>**Disclaimer:** This library is designed to help reduce duplicate executions through idempotency patterns. It does not guarantee exactly-once semantics in all failure scenarios—correct behavior depends on proper integration, idempotent handlers, and appropriate storage configuration. The authors are not liable for any damages arising from the use of this software. Always test thoroughly before deploying to production. See [LICENSE](LICENSE) for full terms.</sub>

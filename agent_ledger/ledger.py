@@ -19,6 +19,7 @@ from agent_ledger.observability import (
     log_effect_created,
     log_effect_replayed,
     log_handler_error,
+    log_hook_error,
     log_status_transition,
     log_wait_timeout,
     set_context,
@@ -31,6 +32,7 @@ from agent_ledger.types import (
     Effect,
     EffectStatus,
     LedgerDefaults,
+    LedgerHooks,
     RunOptions,
     StaleOptions,
     ToolCall,
@@ -341,6 +343,7 @@ class EffectLedger(Generic[TxT]):
         handler: Callable[[Effect], Coroutine[Any, Any, Any]],
         tx: TxT | None = None,
         run_options: RunOptions | None = None,
+        hooks: LedgerHooks | None = None,
     ) -> Any:
         tracer = get_tracer()
 
@@ -387,7 +390,15 @@ class EffectLedger(Generic[TxT]):
 
                 if begin_result.idempotency_status == "fresh":
                     if requires_approval:
-                        await self.request_approval(effect.idem_key, tx)
+                        transitioned = await self.request_approval(effect.idem_key, tx)
+
+                        if transitioned and hooks and hooks.on_approval_required:
+                            try:
+                                await hooks.on_approval_required(effect)
+                            except Exception as hook_err:
+                                log_hook_error(
+                                    "on_approval_required", effect.id, hook_err
+                                )
 
                         resolved = await self._wait_for_terminal(
                             effect.idem_key, merged, tx
@@ -665,6 +676,9 @@ class EffectLedger(Generic[TxT]):
         tx: TxT | None = None,
     ) -> Effect | None:
         return await self._store.find_by_idem_key(idem_key, tx)
+
+    def idem_key(self, call: ToolCall) -> str:
+        return compute_idem_key(call)
 
     async def request_approval(
         self,

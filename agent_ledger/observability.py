@@ -159,3 +159,14 @@ def log_wait_timeout(idem_key: str, timeout_ms: int) -> None:
         idem_key=idem_key,
         timeout_ms=timeout_ms,
     )
+
+
+def log_hook_error(hook_name: str, effect_id: str, error: BaseException) -> None:
+    log_event(
+        logging.ERROR,
+        "effect.hook_error",
+        hook_name=hook_name,
+        effect_id=effect_id,
+        error_type=type(error).__name__,
+        error_message=str(error),
+    )

@@ -5,6 +5,8 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Literal
 
+from pydantic import BaseModel, ConfigDict, field_validator
+
 JsonValue = str | int | float | bool | None | list[Any] | dict[str, Any]
 
 
@@ -184,3 +186,16 @@ class RunOptions:
 @dataclass(frozen=True, slots=True)
 class LedgerDefaults:
     run: RunOptions | None = None
+
+
+class LedgerHooks(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    on_approval_required: Any | None = None
+
+    @field_validator("on_approval_required")
+    @classmethod
+    def validate_callable(cls, v: Any) -> Any:
+        if v is not None and not callable(v):
+            raise ValueError("on_approval_required must be callable")
+        return v
