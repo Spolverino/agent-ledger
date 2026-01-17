@@ -3,35 +3,92 @@
 [![Pixel fonts](https://see.fontimg.com/api/rf5/BLAPB/YWMxYTMyY2I3MjZmNDUzN2JiZTFiODBiM2E4NjhiNGMudHRm/cnVuZTA/bitrimus.png?r=fs&h=77&w=1000&fg=000000&bg=FFFFFF&tb=1&s=77)](https://www.fontspace.com/category/pixel)
 
 <h3>
-AI agents retry. Tool calls shouldn't.
+AI agents retry. Side effects shouldn't.
 </h3>
-
-</div>
 
 ---
 
 <div align="center">
 
-Idempotent tool execution for AI agents (Postgres for crash recovery + multi-worker).<br/>
-Human sign-off locked to the exact tool call + args (no "approve X, run Y").
+<h3>Idempotent tool execution for AI agents</h3>
 
-*Idempotent side effects. Human approval gates. Queryable audit trail.*
+<p>
+Safe retries, crash recovery, and multi-worker coordination.
+</p>
 
-**Works with any async Python tool executor.** Examples: [LangGraph](examples/) / [LangChain](examples/). (more coming)
+<p>
+<b>Idempotency + replay</b> • same tool + args (+ scope) → same effect → return recorded result<br/>
+<b>Intent-bound approvals</b> • approve the exact tool call + args (no “approve X, run Y”)<br/>
+<b>Queryable receipts</b> • every side effect recorded (inputs, outputs, timing, status)
+</p>
 
-[![PyPI version](https://badge.fury.io/py/agent-ledger.svg)](https://badge.fury.io/py/agent-ledger)
-[![CI](https://github.com/rune0/agent-ledger-py/actions/workflows/ci.yml/badge.svg)](https://github.com/rune0/agent-ledger-py/actions/workflows/ci.yml)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+<p>
+<b>Framework-agnostic:</b> wrap any async Python tool handler. Examples: <a href="examples/">LangGraph</a> / <a href="examples/">LangChain</a>.
+</p>
+
+<p>
+<a href="https://badge.fury.io/py/agent-ledger"><img src="https://badge.fury.io/py/agent-ledger.svg" alt="PyPI version"></a>
+<a href="https://github.com/rune0-dev/agent-ledger/actions/workflows/ci.yml"><img src="https://github.com/rune0-dev/agent-ledger/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+<a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.10+-blue.svg" alt="Python 3.10+"></a>
+<a href="https://opensource.org/licenses/Apache-2.0"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License: Apache-2.0"></a>
+</p>
 
 </div>
+
+
+
+</div>
+
+<div align="center">
+
+<pre>
+POST /agent/run  ×5 retries
+{"tool": "stripe.charge", "amount": 50}
+</pre>
+
+<img src="assets/side-by-side.gif" alt="agent-ledger demo: without vs with idempotency" width="700">
+
+<table>
+<tr>
+<td align="center"><b>With agent-ledger</b><br><code>CHARGES_CREATED: 1</code></td>
+<td align="center"><b>Without agent-ledger</b><br><code>CHARGES_CREATED: 5</code></td>
+</tr>
+</table>
+
+</div>
+
+---
+
+## Why This Exists
+
+**LLMs are non-deterministic. Your APIs aren't.**
+
+When an agent crashes or retries, it doesn't remember what it already did:
+
+- A tool call **times out** → the agent retries → **the side effect happens twice** (charge/email/ticket).
+- The run crashes mid-step → **you can’t tell which tools executed** (no receipts).
+- Multiple workers pick up the same task → **duplicate external actions** (at-least-once).
+- A human approves one action → **the agent runs a different one** (arg drift).
+
+`agent-ledger` sits between your agent and the outside world:
+
+| Problem | How agent-ledger helps |
+|---------|------------------------|
+| Agent retried → API called twice | **Idempotency**: same tool + args (+ scope) → same effect → recorded result replayed, handler skipped |
+| "What did the agent actually do?" | **Audit trail**: every call recorded with inputs, outputs, timing |
+| Two workers hit the same task | **Concurrency**: first writer wins, others wait for the recorded result |
+| Process crashed mid-execution | **Crash recovery**: new process reads the ledger, resumes safely |
+| Agent deployed without permission | **Approvals**: sensitive tools pause until a human approves |
+
+---
 
 ## Installation
 
 ```bash
+# To use in dev-mode with MemoryStore
 pip install agent-ledger
 
-# With PostgreSQL support
+# To use in production-mode with PostgresDB
 pip install agent-ledger[postgres]
 ```
 
@@ -39,14 +96,21 @@ pip install agent-ledger[postgres]
 
 ```python
 import asyncio
-from agent_ledger import EffectLedger, EffectLedgerOptions, MemoryStore, ToolCall
+from psycopg_pool import AsyncConnectionPool
+from agent_ledger import EffectLedger, EffectLedgerOptions, ToolCall
+from agent_ledger.stores.postgres import PostgresStore, SCHEMA_SQL
 
 async def charge_customer(effect):
     print(f"Charging {effect.args_canonical}...")
     return {"status": "charged", "id": "ch_123"}
 
 async def main():
-    store = MemoryStore()
+    # Connect to Postgres
+    pool = AsyncConnectionPool(conninfo="postgresql://localhost/mydb")
+    async with pool.connection() as conn:
+        await conn.execute(SCHEMA_SQL)  # Create table if needed
+
+    store = PostgresStore(pool=pool)
     ledger = EffectLedger(EffectLedgerOptions(store=store))
 
     # First call: executes the handler
@@ -60,7 +124,7 @@ async def main():
     )
     print(f"First call: {result}")
 
-    # Second call: same inputs → returns recorded result
+    # Second call: same inputs → returns recorded result (handler not called)
     result2 = await ledger.run(
         ToolCall(
             workflow_id="order-123",
@@ -73,6 +137,10 @@ async def main():
     # Handler only executed once. No double charge.
 
 asyncio.run(main())
+
+# For quick prototyping without Postgres:
+# from agent_ledger import MemoryStore
+# store = MemoryStore()  # In-memory, not durable
 ```
 
 **Output:**
@@ -84,24 +152,6 @@ Second call: {'status': 'charged', 'id': 'ch_123'}
 ```
 
 Same inputs → same hash → same result. The handler only runs once.
-
----
-
-## Why This Exists
-
-LLMs are non-deterministic. Your payment API isn't.
-
-When an agent crashes or retries, it doesn't remember what it already did. A timeout becomes a double charge. A retry loop becomes inbox spam. A crashed deploy leaves you guessing what actually ran.
-
-`agent-ledger` sits between your agent and the outside world:
-
-| Problem | How agent-ledger helps |
-|---------|----------------------|
-| Agent retried → customer charged twice | **Idempotency**: Same inputs → same hash → recorded result replayed, handler skipped |
-| Agent deployed without permission | **Approvals**: Sensitive tools pause until a human approves |
-| "What did the agent actually do?" | **Audit trail**: Every call recorded with inputs, outputs, timing |
-| Process crashed mid-execution | **Crash recovery**: New process reads ledger, resumes safely |
-| Two workers hit the same task | **Concurrency**: First writer wins, others wait for result |
 
 ---
 
@@ -194,7 +244,8 @@ result = await execute_tool_safely(
 # Retries won't send duplicate emails
 ```
 
-This pattern works with LangChain, LangGraph, CrewAI, or any other framework. See [`examples/`](examples/) for framework-specific integrations.
+This pattern works anywhere you control the tool call boundary (LangChain/LangGraph/CrewAI/your own loop).
+See [`examples/`](examples/) for framework-specific integrations.
 
 ---
 
@@ -235,7 +286,7 @@ processing → succeeded
 ### Design Constraints
 
 - **At-most-once commit per idem_key**: Each unique `(workflow_id, tool, args)` tuple is recorded at most once, enforced by the store's unique constraint on `idem_key` and atomic upsert semantics
-- **Downstream exactly-once**: Depends on your handler being idempotent or the downstream API supporting idempotency keys
+- **Exactly-once execution**: Depends on your handler being idempotent or the downstream API supporting idempotency keys. If it does, passing down effect.idem_key would ensure exactly-once execution.
 - **Deterministic canonicalization**: Args are JSON-serialized with sorted keys; non-deterministic values (timestamps, UUIDs) in args will create new records
 - **Multi-tenant isolation**: Include tenant/user/principal in `workflow_id` (or in `args`) to prevent cross-actor deduplication. The library does not enforce tenant boundaries—your application must scope `workflow_id` appropriately
 
@@ -245,7 +296,7 @@ processing → succeeded
 
 ### Custom Idempotency Keys
 
-Hash only specific fields—ignore the rest:
+Use only specific fields to produce the effect hash—ignore the rest:
 
 ```python
 await ledger.run(
@@ -253,7 +304,7 @@ await ledger.run(
         workflow_id="ticket-456",
         tool="github.create_issue",
         args={"owner": "acme", "repo": "app", "title": "Bug", "body": "Details..."},
-        idempotency_keys=["owner", "repo", "title"],  # body changes won't re-execute
+        idempotency_keys=["owner", "repo", "title"],  # body changes won't re-execute; would compute to the same hash.
     ),
     handler=create_issue,
 )
@@ -336,7 +387,7 @@ except Exception as e:
 **Does this replace Temporal?**
 No. Temporal is a full workflow orchestration engine. `agent-ledger` is a lightweight idempotency layer you can use inside Temporal activities, or standalone.
 
-**Can it prevent double Stripe charges?**
+**Can it prevent double Stripe charges/email sends/any other agent action?**
 Yes—by replaying the recorded result instead of re-executing the handler. For extra safety, also pass Stripe's own `idempotency_key` in your API call.
 
 **What is `workflow_id`?**
