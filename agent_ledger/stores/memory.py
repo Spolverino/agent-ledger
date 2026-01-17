@@ -4,7 +4,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from cachetools import TTLCache
 
@@ -55,7 +55,7 @@ class MemoryStore:
     async def find_by_idem_key(
         self,
         idem_key: str,
-        tx: None = None,
+        tx: Any = None,
     ) -> Effect | None:
         try:
             async with self._lock:
@@ -73,7 +73,7 @@ class MemoryStore:
     async def find_by_id(
         self,
         effect_id: str,
-        tx: None = None,
+        tx: Any = None,
     ) -> Effect | None:
         try:
             async with self._lock:
@@ -96,7 +96,7 @@ class MemoryStore:
     async def upsert(
         self,
         input_data: UpsertEffectInput,
-        tx: None = None,
+        tx: Any = None,
     ) -> UpsertEffectResult:
         try:
             async with self._lock:
@@ -145,7 +145,7 @@ class MemoryStore:
         to_status: EffectStatus,
         result: JsonValue = None,
         error: dict[str, str | None] | None = None,
-        tx: None = None,
+        tx: Any = None,
     ) -> bool:
         try:
             async with self._lock:
@@ -211,7 +211,7 @@ class MemoryStore:
     async def increment_dedup_count(
         self,
         idem_key: str,
-        tx: None = None,
+        tx: Any = None,
     ) -> None:
         try:
             async with self._lock:
@@ -251,7 +251,7 @@ class MemoryStore:
         effect_id: str,
         from_status: EffectStatus,
         stale_threshold_ms: int | None = None,
-        tx: None = None,
+        tx: Any = None,
     ) -> bool:
         try:
             async with self._lock:

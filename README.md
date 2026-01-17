@@ -15,7 +15,7 @@ AI agents retry. Tool calls shouldn't.
 Idempotent tool execution for AI agents (Postgres for crash recovery + multi-worker).<br/>
 Human sign-off locked to the exact tool call + args (no "approve X, run Y").
 
-*Idempotent tool calls. First-class human approval gates. Queriable recorded execution history.*
+*Idempotent side effects. Human approval gates. Queryable audit trail.*
 
 **Works with any async Python tool executor.** Examples: [LangGraph](examples/) / [LangChain](examples/). (more coming)
 
