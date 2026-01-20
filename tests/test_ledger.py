@@ -903,9 +903,9 @@ class TestConcurrency:
     async def test_wait_timeout_raises_error(self, store: Any) -> None:
         short_timeout = RunOptions(
             concurrency=ConcurrencyOptions(
-                wait_timeout_ms=50,
-                initial_interval_ms=10,
-                max_interval_ms=20,
+                effect_timeout_s=0.05,
+                initial_interval_s=0.01,
+                max_interval_s=0.02,
             )
         )
         ledger = EffectLedger(EffectLedgerOptions(store=store))
@@ -927,7 +927,7 @@ class TestConcurrency:
         with pytest.raises(EffectTimeoutError) as exc_info:
             await ledger.run(call, fast_handler, run_options=short_timeout)
 
-        assert "50ms" in str(exc_info.value)
+        assert "0.05s" in str(exc_info.value)
 
         task_a.cancel()
         with contextlib.suppress(asyncio.CancelledError):
@@ -1054,9 +1054,9 @@ class TestConcurrency:
 
         short_opts = RunOptions(
             concurrency=ConcurrencyOptions(
-                wait_timeout_ms=100,
-                initial_interval_ms=10,
-                max_interval_ms=20,
+                effect_timeout_s=0.1,
+                initial_interval_s=0.01,
+                max_interval_s=0.02,
             )
         )
 

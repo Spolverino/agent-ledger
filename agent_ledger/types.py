@@ -212,18 +212,19 @@ class UpsertEffectResult:
 class ConcurrencyOptions(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    wait_timeout_ms: PositiveInt = 30_000
-    initial_interval_ms: PositiveInt = 50
-    max_interval_ms: PositiveInt = 1_000
+    effect_timeout_s: PositiveFloat = 30.0
+    approval_timeout_s: PositiveFloat | None = None
+    initial_interval_s: PositiveFloat = 0.05
+    max_interval_s: PositiveFloat = 1.0
     backoff_multiplier: PositiveFloat = 1.5
     jitter_factor: UnitFloat = 0.3
 
     @model_validator(mode="after")
     def validate_interval_ordering(self) -> ConcurrencyOptions:
-        if self.initial_interval_ms > self.max_interval_ms:
+        if self.initial_interval_s > self.max_interval_s:
             raise ValueError(
-                f"initial_interval_ms ({self.initial_interval_ms}) must be <= "
-                f"max_interval_ms ({self.max_interval_ms})"
+                f"initial_interval_s ({self.initial_interval_s}) must be <= "
+                f"max_interval_s ({self.max_interval_s})"
             )
         return self
 

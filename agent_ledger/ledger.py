@@ -53,9 +53,10 @@ from agent_ledger.utils import (
 TxT = TypeVar("TxT")
 
 DEFAULT_CONCURRENCY = ConcurrencyOptions(
-    wait_timeout_ms=30_000,
-    initial_interval_ms=50,
-    max_interval_ms=1_000,
+    effect_timeout_s=30.0,
+    approval_timeout_s=None,
+    initial_interval_s=0.05,
+    max_interval_s=1.0,
     backoff_multiplier=1.5,
     jitter_factor=0.3,
 )
@@ -104,23 +105,29 @@ def _merge_options(
     per_call: RunOptions | None,
 ) -> MergedOptions:
     concurrency = ConcurrencyOptions(
-        wait_timeout_ms=_get_concurrency_field(
+        effect_timeout_s=_get_concurrency_field(
             per_call,
             instance_defaults,
-            "wait_timeout_ms",
-            DEFAULT_CONCURRENCY.wait_timeout_ms,
+            "effect_timeout_s",
+            DEFAULT_CONCURRENCY.effect_timeout_s,
         ),
-        initial_interval_ms=_get_concurrency_field(
+        approval_timeout_s=_get_concurrency_field(
             per_call,
             instance_defaults,
-            "initial_interval_ms",
-            DEFAULT_CONCURRENCY.initial_interval_ms,
+            "approval_timeout_s",
+            DEFAULT_CONCURRENCY.approval_timeout_s,
         ),
-        max_interval_ms=_get_concurrency_field(
+        initial_interval_s=_get_concurrency_field(
             per_call,
             instance_defaults,
-            "max_interval_ms",
-            DEFAULT_CONCURRENCY.max_interval_ms,
+            "initial_interval_s",
+            DEFAULT_CONCURRENCY.initial_interval_s,
+        ),
+        max_interval_s=_get_concurrency_field(
+            per_call,
+            instance_defaults,
+            "max_interval_s",
+            DEFAULT_CONCURRENCY.max_interval_s,
         ),
         backoff_multiplier=_get_concurrency_field(
             per_call,
@@ -149,10 +156,10 @@ def _merge_options(
     return MergedOptions(concurrency=concurrency, stale=stale)
 
 
-def _compute_next_interval(current_interval: int, opts: ConcurrencyOptions) -> int:
-    base = min(current_interval * opts.backoff_multiplier, opts.max_interval_ms)
+def _compute_next_interval(current_interval: float, opts: ConcurrencyOptions) -> float:
+    base = min(current_interval * opts.backoff_multiplier, opts.max_interval_s)
     jitter = base * opts.jitter_factor * (random.random() * 2 - 1)
-    return max(1, int(base + jitter))
+    return max(0.001, base + jitter)
 
 
 def _is_effect_stale(effect: Effect, stale_after_ms: int) -> bool:
@@ -285,19 +292,30 @@ class EffectLedger(Generic[TxT]):
         idem_key: str,
         opts: MergedOptions,
         tx: TxT | None = None,
+        for_approval: bool = False,
     ) -> Effect:
         tracer = get_tracer()
+
+        timeout_s = (
+            opts.concurrency.approval_timeout_s
+            if for_approval
+            else opts.concurrency.effect_timeout_s
+        )
+
         with tracer.start_as_current_span(
             "agent_ledger.wait_for_terminal",
             attributes={
                 "idem_key": idem_key,
-                "timeout_ms": opts.concurrency.wait_timeout_ms,
+                "timeout_s": timeout_s,
+                "for_approval": for_approval,
             },
         ) as span:
             loop = asyncio.get_running_loop()
-            deadline = loop.time() + (opts.concurrency.wait_timeout_ms / 1000)
+            deadline = (
+                loop.time() + timeout_s if timeout_s is not None else float("inf")
+            )
 
-            interval = opts.concurrency.initial_interval_ms
+            interval = opts.concurrency.initial_interval_s
             poll_count = 0
 
             while True:
@@ -332,11 +350,11 @@ class EffectLedger(Generic[TxT]):
                 if loop.time() >= deadline:
                     span.set_attribute("poll_count", poll_count)
                     span.set_attribute("timed_out", True)
-                    log_wait_timeout(idem_key, opts.concurrency.wait_timeout_ms)
+                    log_wait_timeout(idem_key, timeout_s)
 
-                    raise EffectTimeoutError(idem_key, opts.concurrency.wait_timeout_ms)
+                    raise EffectTimeoutError(idem_key, timeout_s)
 
-                await asyncio.sleep(interval / 1000)
+                await asyncio.sleep(interval)
                 interval = _compute_next_interval(interval, opts.concurrency)
 
     async def run(
@@ -392,7 +410,7 @@ class EffectLedger(Generic[TxT]):
                                 )
 
                         resolved = await self._wait_for_terminal(
-                            effect.idem_key, merged, tx
+                            effect.idem_key, merged, tx, for_approval=True
                         )
 
                         return await self._handle_resolved_effect(
@@ -426,7 +444,7 @@ class EffectLedger(Generic[TxT]):
                         )
 
                     resolved = await self._wait_for_terminal(
-                        effect.idem_key, merged, tx
+                        effect.idem_key, merged, tx, for_approval=False
                     )
 
                     return await self._handle_resolved_effect(
@@ -435,7 +453,7 @@ class EffectLedger(Generic[TxT]):
 
                 if effect.status == EffectStatus.REQUIRES_APPROVAL:
                     resolved = await self._wait_for_terminal(
-                        effect.idem_key, merged, tx
+                        effect.idem_key, merged, tx, for_approval=True
                     )
 
                     return await self._handle_resolved_effect(
@@ -499,7 +517,9 @@ class EffectLedger(Generic[TxT]):
 
         if not claimed:
             # Someone else got it, wait for their result
-            resolved = await self._wait_for_terminal(effect.idem_key, merged, tx)
+            resolved = await self._wait_for_terminal(
+                effect.idem_key, merged, tx, for_approval=False
+            )
 
             # If terminal, return result directly
             if is_terminal_status(resolved.status):
@@ -560,7 +580,9 @@ class EffectLedger(Generic[TxT]):
             )
 
         if effect.status == EffectStatus.REQUIRES_APPROVAL:
-            resolved = await self._wait_for_terminal(effect.idem_key, merged, tx)
+            resolved = await self._wait_for_terminal(
+                effect.idem_key, merged, tx, for_approval=True
+            )
             return await self._handle_resolved_effect(resolved, handler, merged, tx)
 
         if effect.status == EffectStatus.PROCESSING and _is_effect_stale(
@@ -576,7 +598,9 @@ class EffectLedger(Generic[TxT]):
             )
 
         if effect.status == EffectStatus.PROCESSING:
-            resolved = await self._wait_for_terminal(effect.idem_key, merged, tx)
+            resolved = await self._wait_for_terminal(
+                effect.idem_key, merged, tx, for_approval=False
+            )
             return await self._handle_resolved_effect(resolved, handler, merged, tx)
 
         raise EffectLedgerInvariantError(

@@ -220,7 +220,7 @@ The agent waits. The human decides. The ledger records everything.
 - `requires_approval`: Policy hook that returns `bool`. Called for fresh effects only (not replays).
 - `on_approval_required`: Notification hook that fires once when approval is needed. Errors are logged but don't abort the run.
 
-`run()` polls until the effect is approved, with exponential backoff (default: 30s timeout, 50ms initial interval, 1.5x backoff multiplier). Configurable via `RunOptions.concurrency` (see [Configuration](#configuration)). After approval, the handler executes and the result is returned.
+`run()` polls until the effect is approved, with exponential backoff. By default, approval waits **indefinitely** (`approval_timeout_s=None`). Configurable via `RunOptions.concurrency` (see [Configuration](#configuration)). After approval, the handler executes and the result is returned.
 
 **Key flow**: The notification hook receives `effect.idem_key`—this is the approval handle. External systems (Slack, admin panels, CLIs) store this key in button payloads/URLs and pass it to `approve(idem_key)` or `deny(idem_key, reason)`.
 
@@ -437,9 +437,10 @@ await ledger.run(
     handler=my_handler,
     run_options=RunOptions(
         concurrency=ConcurrencyOptions(
-            wait_timeout_ms=30_000,      # Max wait time for in-flight effects (default: 30s)
-            initial_interval_ms=50,      # First poll interval (default: 50ms)
-            max_interval_ms=1_000,       # Cap for backoff interval (default: 1s)
+            effect_timeout_s=30.0,       # Timeout for in-flight effects (default: 30s)
+            approval_timeout_s=None,     # Timeout for human approval (default: None = indefinite)
+            initial_interval_s=0.05,     # First poll interval (default: 50ms)
+            max_interval_s=1.0,          # Cap for backoff interval (default: 1s)
             backoff_multiplier=1.5,      # Exponential backoff rate (default: 1.5x)
             jitter_factor=0.3,           # Random jitter to avoid thundering herd (default: 0.3)
         ),
@@ -457,14 +458,16 @@ ledger = EffectLedger(
         store=store,
         defaults=LedgerDefaults(
             run=RunOptions(
-                concurrency=ConcurrencyOptions(wait_timeout_ms=60_000),  # 60s timeout
+                concurrency=ConcurrencyOptions(effect_timeout_s=60.0),  # 60s for effects
             ),
         ),
     ),
 )
 ```
 
-**Polling behavior**: When waiting for an in-flight or approval-required effect, `run()` polls the store with exponential backoff. Initial interval is 50ms, increasing by 1.5x each retry (up to 1s max), with 30% jitter. Times out after 30s by default.
+**Polling behavior**: `run()` polls with exponential backoff (50ms initial, 1.5x growth, 1s max, 30% jitter).
+- **In-flight effects**: Times out after `effect_timeout_s` (default: 30s)
+- **Human approval**: Waits `approval_timeout_s` (default: `None` = indefinite)
 
 ---
 

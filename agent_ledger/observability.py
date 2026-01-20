@@ -152,12 +152,12 @@ def log_handler_error(effect_id: str, error: BaseException) -> None:
     )
 
 
-def log_wait_timeout(idem_key: str, timeout_ms: int) -> None:
+def log_wait_timeout(idem_key: str, timeout_s: float | None) -> None:
     log_event(
         logging.WARNING,
         "effect.wait_timeout",
         idem_key=idem_key,
-        timeout_ms=timeout_ms,
+        timeout_s=timeout_s,
     )
 
 
