@@ -19,6 +19,7 @@ from agent_ledger import (
     EffectStatus,
     EffectStoreError,
     EffectTimeoutError,
+    LedgerHooks,
     MemoryStore,
     RunOptions,
     StaleOptions,
@@ -557,7 +558,7 @@ class TestApprovalFlow:
             return await ledger.run(
                 call,
                 handler,
-                run_options=RunOptions(requires_approval=True),
+                hooks=LedgerHooks(requires_approval=lambda _: True),
             )
 
         task = asyncio.create_task(waiter())
@@ -586,7 +587,7 @@ class TestApprovalFlow:
             return await ledger.run(
                 call,
                 handler,
-                run_options=RunOptions(requires_approval=True),
+                hooks=LedgerHooks(requires_approval=lambda _: True),
             )
 
         task = asyncio.create_task(waiter())
@@ -836,7 +837,7 @@ class TestConcurrency:
             return await ledger.run(
                 call,
                 handler,
-                run_options=RunOptions(requires_approval=True),
+                hooks=LedgerHooks(requires_approval=lambda _: True),
             )
 
         tasks = [asyncio.create_task(waiter()) for _ in range(3)]
@@ -1409,8 +1410,6 @@ class TestHooks:
     async def test_on_approval_required_fires_on_fresh_creation(
         self, store: MemoryStore
     ) -> None:
-        from agent_ledger import LedgerHooks
-
         ledger = EffectLedger(EffectLedgerOptions(store=store))
         call = make_call(args={"hooks": "fresh_creation"})
 
@@ -1419,7 +1418,10 @@ class TestHooks:
         async def on_approval(effect: Any) -> None:
             hook_calls.append(effect)
 
-        hooks = LedgerHooks(on_approval_required=on_approval)
+        hooks = LedgerHooks(
+            requires_approval=lambda _: True,
+            on_approval_required=on_approval,
+        )
 
         async def handler(eff: Any) -> dict[str, bool]:
             return {"done": True}
@@ -1431,7 +1433,6 @@ class TestHooks:
             return await ledger.run(
                 call,
                 handler,
-                run_options=RunOptions(requires_approval=True),
                 hooks=hooks,
             )
 
@@ -1451,8 +1452,6 @@ class TestHooks:
     async def test_on_approval_required_does_not_fire_on_replay(
         self, store: MemoryStore
     ) -> None:
-        from agent_ledger import LedgerHooks
-
         ledger = EffectLedger(EffectLedgerOptions(store=store))
         call = make_call(args={"hooks": "replay_test"})
 
@@ -1461,7 +1460,10 @@ class TestHooks:
         async def on_approval(effect: Any) -> None:
             hook_calls.append(effect)
 
-        hooks = LedgerHooks(on_approval_required=on_approval)
+        hooks = LedgerHooks(
+            requires_approval=lambda _: True,
+            on_approval_required=on_approval,
+        )
 
         async def handler(eff: Any) -> dict[str, bool]:
             return {"done": True}
@@ -1476,7 +1478,6 @@ class TestHooks:
             return await ledger.run(
                 call,
                 handler,
-                run_options=RunOptions(requires_approval=True),
                 hooks=hooks,
             )
 
@@ -1491,15 +1492,16 @@ class TestHooks:
         assert result == {"done": True}
 
     async def test_hook_error_does_not_abort_run(self, store: MemoryStore) -> None:
-        from agent_ledger import LedgerHooks
-
         ledger = EffectLedger(EffectLedgerOptions(store=store))
         call = make_call(args={"hooks": "error_handling"})
 
         async def failing_hook(effect: Any) -> None:
             raise RuntimeError("Hook failed!")
 
-        hooks = LedgerHooks(on_approval_required=failing_hook)
+        hooks = LedgerHooks(
+            requires_approval=lambda _: True,
+            on_approval_required=failing_hook,
+        )
 
         async def handler(eff: Any) -> dict[str, bool]:
             return {"done": True}
@@ -1511,7 +1513,6 @@ class TestHooks:
             return await ledger.run(
                 call,
                 handler,
-                run_options=RunOptions(requires_approval=True),
                 hooks=hooks,
             )
 
@@ -1568,3 +1569,234 @@ class TestHooks:
 
         hooks_default = LedgerHooks()
         assert hooks_default.on_approval_required is None
+
+
+class TestPolicyHook:
+    async def test_requires_approval_hook_triggers_approval_flow(
+        self, store: MemoryStore
+    ) -> None:
+        from agent_ledger import LedgerHooks
+
+        ledger = EffectLedger(EffectLedgerOptions(store=store))
+
+        def policy(call: ToolCall) -> bool:
+            return call.tool == "dangerous.tool"
+
+        hooks = LedgerHooks(requires_approval=policy)
+
+        async def handler(eff: Any) -> dict[str, bool]:
+            return {"executed": True}
+
+        safe_call = make_call(tool="safe.tool", args={"policy": "safe"})
+        result = await ledger.run(safe_call, handler, hooks=hooks)
+        assert result == {"executed": True}
+
+        safe_effect = await store.find_by_idem_key(ledger.idem_key(safe_call))
+        assert safe_effect is not None
+        assert safe_effect.status == EffectStatus.SUCCEEDED
+
+    async def test_requires_approval_hook_blocks_dangerous_tool(
+        self, store: MemoryStore
+    ) -> None:
+        from agent_ledger import LedgerHooks
+
+        ledger = EffectLedger(EffectLedgerOptions(store=store))
+
+        def policy(call: ToolCall) -> bool:
+            return call.tool == "dangerous.tool"
+
+        hooks = LedgerHooks(requires_approval=policy)
+
+        async def handler(eff: Any) -> dict[str, bool]:
+            return {"executed": True}
+
+        dangerous_call = make_call(tool="dangerous.tool", args={"policy": "dangerous"})
+
+        waiter_started = asyncio.Event()
+
+        async def run_dangerous() -> Any:
+            waiter_started.set()
+            return await ledger.run(dangerous_call, handler, hooks=hooks)
+
+        task = asyncio.create_task(run_dangerous())
+        await waiter_started.wait()
+        await asyncio.sleep(0.02)
+
+        dangerous_effect = await store.find_by_idem_key(ledger.idem_key(dangerous_call))
+        assert dangerous_effect is not None
+        assert dangerous_effect.status == EffectStatus.REQUIRES_APPROVAL
+
+        await ledger.approve(dangerous_effect.idem_key)
+        result = await task
+        assert result == {"executed": True}
+
+    async def test_requires_approval_hook_checks_args(self, store: MemoryStore) -> None:
+        from agent_ledger import LedgerHooks
+
+        ledger = EffectLedger(EffectLedgerOptions(store=store))
+
+        def policy(call: ToolCall) -> bool:
+            return call.args.get("amount", 0) > 1000
+
+        hooks = LedgerHooks(requires_approval=policy)
+
+        async def handler(eff: Any) -> dict[str, bool]:
+            return {"charged": True}
+
+        small_call = make_call(tool="stripe.charge", args={"amount": 500})
+        result = await ledger.run(small_call, handler, hooks=hooks)
+        assert result == {"charged": True}
+
+        small_effect = await store.find_by_idem_key(ledger.idem_key(small_call))
+        assert small_effect is not None
+        assert small_effect.status == EffectStatus.SUCCEEDED
+
+    async def test_requires_approval_hook_large_amount_requires_approval(
+        self, store: MemoryStore
+    ) -> None:
+        from agent_ledger import LedgerHooks
+
+        ledger = EffectLedger(EffectLedgerOptions(store=store))
+
+        def policy(call: ToolCall) -> bool:
+            return call.args.get("amount", 0) > 1000
+
+        hooks = LedgerHooks(requires_approval=policy)
+
+        async def handler(eff: Any) -> dict[str, bool]:
+            return {"charged": True}
+
+        large_call = make_call(tool="stripe.charge", args={"amount": 5000})
+
+        waiter_started = asyncio.Event()
+
+        async def run_large() -> Any:
+            waiter_started.set()
+            return await ledger.run(large_call, handler, hooks=hooks)
+
+        task = asyncio.create_task(run_large())
+        await waiter_started.wait()
+        await asyncio.sleep(0.02)
+
+        large_effect = await store.find_by_idem_key(ledger.idem_key(large_call))
+        assert large_effect is not None
+        assert large_effect.status == EffectStatus.REQUIRES_APPROVAL
+
+        await ledger.approve(large_effect.idem_key)
+        result = await task
+        assert result == {"charged": True}
+
+    async def test_requires_approval_hook_takes_precedence_over_run_options(
+        self, store: MemoryStore
+    ) -> None:
+        from agent_ledger import LedgerHooks
+
+        ledger = EffectLedger(EffectLedgerOptions(store=store))
+
+        def policy(call: ToolCall) -> bool:
+            return False
+
+        hooks = LedgerHooks(requires_approval=policy)
+
+        async def handler(eff: Any) -> dict[str, bool]:
+            return {"executed": True}
+
+        call = make_call(args={"no_approval": "test"})
+        result = await ledger.run(
+            call,
+            handler,
+            hooks=hooks,
+        )
+
+        assert result == {"executed": True}
+
+        effect = await store.find_by_idem_key(ledger.idem_key(call))
+        assert effect is not None
+        assert effect.status == EffectStatus.SUCCEEDED
+
+    async def test_requires_approval_hook_with_on_approval_required(
+        self, store: MemoryStore
+    ) -> None:
+        from agent_ledger import LedgerHooks
+
+        ledger = EffectLedger(EffectLedgerOptions(store=store))
+
+        notification_calls: list[Any] = []
+
+        def policy(call: ToolCall) -> bool:
+            return call.tool == "notify.tool"
+
+        async def on_approval(effect: Any) -> None:
+            notification_calls.append(effect)
+
+        hooks = LedgerHooks(
+            requires_approval=policy,
+            on_approval_required=on_approval,
+        )
+
+        async def handler(eff: Any) -> dict[str, bool]:
+            return {"done": True}
+
+        call = make_call(tool="notify.tool", args={"combined": "test"})
+
+        waiter_started = asyncio.Event()
+
+        async def run_with_hooks() -> Any:
+            waiter_started.set()
+            return await ledger.run(call, handler, hooks=hooks)
+
+        task = asyncio.create_task(run_with_hooks())
+        await waiter_started.wait()
+        await asyncio.sleep(0.02)
+
+        assert len(notification_calls) == 1
+        assert notification_calls[0].tool == "notify.tool"
+
+        effect = (await store.list_effects())[0]
+        await ledger.approve(effect.idem_key)
+
+        result = await task
+        assert result == {"done": True}
+
+    def test_requires_approval_hook_validates_callable(self) -> None:
+        from pydantic import ValidationError
+
+        from agent_ledger import LedgerHooks
+
+        with pytest.raises(ValidationError) as exc_info:
+            LedgerHooks(requires_approval="not a callable")
+
+        assert "requires_approval must be callable" in str(exc_info.value)
+
+    def test_requires_approval_hook_accepts_lambda(self) -> None:
+        from agent_ledger import LedgerHooks
+
+        hooks = LedgerHooks(requires_approval=lambda call: call.tool == "test")
+        assert hooks.requires_approval is not None
+        assert callable(hooks.requires_approval)
+
+    async def test_requires_approval_hook_not_called_on_replay(
+        self, store: MemoryStore
+    ) -> None:
+        from agent_ledger import LedgerHooks
+
+        ledger = EffectLedger(EffectLedgerOptions(store=store))
+
+        policy_calls: list[ToolCall] = []
+
+        def policy(call: ToolCall) -> bool:
+            policy_calls.append(call)
+            return False
+
+        hooks = LedgerHooks(requires_approval=policy)
+
+        async def handler(eff: Any) -> dict[str, bool]:
+            return {"done": True}
+
+        call = make_call(args={"replay": "test"})
+
+        await ledger.run(call, handler, hooks=hooks)
+        assert len(policy_calls) == 1
+
+        await ledger.run(call, handler, hooks=hooks)
+        assert len(policy_calls) == 1

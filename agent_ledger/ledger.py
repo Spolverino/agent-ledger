@@ -372,18 +372,6 @@ class EffectLedger(Generic[TxT]):
                     run_options,
                 )
 
-                per_call_approval = (
-                    run_options.requires_approval if run_options else None
-                )
-                defaults_approval = (
-                    self._defaults.run.requires_approval
-                    if self._defaults and self._defaults.run
-                    else None
-                )
-                requires_approval = _coalesce(
-                    per_call_approval, defaults_approval, False
-                )
-
                 begin_result = await self.begin(call, tx)
                 effect = begin_result.effect
 
@@ -391,6 +379,7 @@ class EffectLedger(Generic[TxT]):
                 set_context(effect_id=effect.id)
 
                 if begin_result.idempotency_status == "fresh":
+                    requires_approval = self._compute_requires_approval(call, hooks)
                     if requires_approval:
                         transitioned = await self.request_approval(effect.idem_key, tx)
 
@@ -664,6 +653,15 @@ class EffectLedger(Generic[TxT]):
                 # Otherwise, just raise the original error
 
             raise
+
+    def _compute_requires_approval(
+        self,
+        call: ToolCall,
+        hooks: LedgerHooks | None,
+    ) -> bool:
+        if hooks and hooks.requires_approval is not None:
+            return bool(hooks.requires_approval(call))
+        return False
 
     async def get_effect(
         self,

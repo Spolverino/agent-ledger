@@ -157,31 +157,43 @@ Same inputs → same hash → same result. The handler only runs once.
 
 ## The "Pause Button" for Your Agent (Human-in-the-loop)
 
-High-stakes operations can require human approval before execution (example of a Slack message as approval request integration):
+High-stakes operations can require human approval before execution. Use the `requires_approval` policy hook to decide dynamically:
 
 ```python
-from agent_ledger import RunOptions, LedgerHooks
-import json
+from agent_ledger import LedgerHooks, ToolCall
 
-# Agent side: request approval and wait
-async def notify_slack_approval_hook(effect):
-    """Hook fires once when approval is required."""
+# Define a policy: which tool calls need approval?
+def approval_policy(call: ToolCall) -> bool:
+    # Large payments need approval
+    if call.tool == "stripe.charge" and call.args.get("amount", 0) > 1000:
+        return True
+    # Production deploys need approval
+    if call.tool == "k8s.deploy" and call.args.get("env") == "production":
+        return True
+    return False
+
+# Notification hook: fires when approval is required
+async def notify_slack(effect):
     await slack.post_message(
-        channel="#deployments",
+        channel="#approvals",
         text=f"Approval needed: {effect.tool}",
-        blocks=[...],
+        blocks=[...],  # Include approve/deny buttons with effect.idem_key
     )
 
+# Combine policy + notification in hooks
+hooks = LedgerHooks(
+    requires_approval=approval_policy,      # Policy: decides IF approval needed
+    on_approval_required=notify_slack,      # Notification: fires WHEN approval needed
+)
 
 result = await ledger.run(
     ToolCall(
         workflow_id="deploy-prod",
         tool="k8s.deploy",
-        args={"image": "app:v2"},
+        args={"image": "app:v2", "env": "production"},
     ),
     handler=deploy_to_k8s,
-    run_options=RunOptions(requires_approval=True),
-    hooks=LedgerHooks(on_approval_required=notify_slack_approval_hook),
+    hooks=hooks,
 )
 
 # Slack bot side: handle button click
@@ -204,13 +216,17 @@ async def handle_deny(ack, body):
 
 The agent waits. The human decides. The ledger records everything.
 
+**Hook types:**
+- `requires_approval`: Policy hook that returns `bool`. Called for fresh effects only (not replays).
+- `on_approval_required`: Notification hook that fires once when approval is needed. Errors are logged but don't abort the run.
+
 `run()` polls until the effect is approved, with exponential backoff (default: 30s timeout, 50ms initial interval, 1.5x backoff multiplier). Configurable via `RunOptions.concurrency` (see [Configuration](#configuration)). After approval, the handler executes and the result is returned.
 
-The `on_approval_required` hook fires once when the approval request is created—not on retries or replays. Hook errors are logged but don't abort the run.
-
-**Key flow**: The hook receives `effect.idem_key`—this is the approval handle. External systems (Slack, admin panels, CLIs) store this key in button payloads/URLs and pass it to `approve(idem_key)` or `deny(idem_key, reason)`.
+**Key flow**: The notification hook receives `effect.idem_key`—this is the approval handle. External systems (Slack, admin panels, CLIs) store this key in button payloads/URLs and pass it to `approve(idem_key)` or `deny(idem_key, reason)`.
 
 > **Intent-bound approval**: The approval is tied to the exact payload hash. If the agent retries with different arguments, that's a *new* approval request—not a bypass of the previous one.
+
+For static "always require approval", use: `hooks=LedgerHooks(requires_approval=lambda _: True)`
 
 ---
 
@@ -420,7 +436,6 @@ await ledger.run(
     call,
     handler=my_handler,
     run_options=RunOptions(
-        requires_approval=False,
         concurrency=ConcurrencyOptions(
             wait_timeout_ms=30_000,      # Max wait time for in-flight effects (default: 30s)
             initial_interval_ms=50,      # First poll interval (default: 50ms)
@@ -442,7 +457,6 @@ ledger = EffectLedger(
         store=store,
         defaults=LedgerDefaults(
             run=RunOptions(
-                requires_approval=True,  # All calls need approval by default
                 concurrency=ConcurrencyOptions(wait_timeout_ms=60_000),  # 60s timeout
             ),
         ),
