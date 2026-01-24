@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from typing import TYPE_CHECKING, Protocol, TypeVar, runtime_checkable
 
 if TYPE_CHECKING:
@@ -21,7 +21,7 @@ TxT = TypeVar("TxT")
 
 @runtime_checkable
 class EffectStore(Protocol[TxT]):
-    def transaction(self) -> AsyncIterator[TxT]: ...
+    def transaction(self) -> AbstractAsyncContextManager[TxT]: ...
 
     async def find_by_idem_key(
         self,

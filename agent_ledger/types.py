@@ -212,18 +212,19 @@ class UpsertEffectResult:
 class ConcurrencyOptions(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    wait_timeout_ms: PositiveInt = 30_000
-    initial_interval_ms: PositiveInt = 50
-    max_interval_ms: PositiveInt = 1_000
+    effect_timeout_s: PositiveFloat = 30.0
+    approval_timeout_s: PositiveFloat | None = None
+    initial_interval_s: PositiveFloat = 0.05
+    max_interval_s: PositiveFloat = 1.0
     backoff_multiplier: PositiveFloat = 1.5
     jitter_factor: UnitFloat = 0.3
 
     @model_validator(mode="after")
     def validate_interval_ordering(self) -> ConcurrencyOptions:
-        if self.initial_interval_ms > self.max_interval_ms:
+        if self.initial_interval_s > self.max_interval_s:
             raise ValueError(
-                f"initial_interval_ms ({self.initial_interval_ms}) must be <= "
-                f"max_interval_ms ({self.max_interval_ms})"
+                f"initial_interval_s ({self.initial_interval_s}) must be <= "
+                f"max_interval_s ({self.max_interval_s})"
             )
         return self
 
@@ -239,7 +240,6 @@ class RunOptions(BaseModel):
 
     concurrency: ConcurrencyOptions | None = None
     stale: StaleOptions | None = None
-    requires_approval: bool = False
 
 
 class LedgerDefaults(BaseModel):
@@ -249,13 +249,42 @@ class LedgerDefaults(BaseModel):
 
 
 class LedgerHooks(BaseModel):
+    """Hooks for customizing ledger behavior.
+
+    Hooks are divided into two categories:
+    - Policy hooks (prefixed with nothing): Return a value that affects control flow
+    - Notification hooks (prefixed with `on_`): Fire-and-forget side effects
+
+    Policy hooks:
+        requires_approval: Called to determine if an effect needs approval.
+            Signature: (ToolCall) -> bool
+            Returns True if approval is required, False otherwise.
+            Only called for fresh effects (not replays).
+
+    Notification hooks:
+        on_approval_required: Called when an effect transitions to REQUIRES_APPROVAL.
+            Signature: async (Effect) -> None
+            Errors are logged but don't abort the run.
+    """
+
     model_config = ConfigDict(frozen=True, extra="forbid")
 
+    # Policy hook: decides if approval is needed
+    requires_approval: Any | None = None
+
+    # Notification hook: fires when approval is needed
     on_approval_required: Any | None = None
+
+    @field_validator("requires_approval")
+    @classmethod
+    def validate_requires_approval_callable(cls, v: Any) -> Any:
+        if v is not None and not callable(v):
+            raise ValueError("requires_approval must be callable")
+        return v
 
     @field_validator("on_approval_required")
     @classmethod
-    def validate_callable(cls, v: Any) -> Any:
+    def validate_on_approval_required_callable(cls, v: Any) -> Any:
         if v is not None and not callable(v):
             raise ValueError("on_approval_required must be callable")
         return v

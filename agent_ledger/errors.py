@@ -64,10 +64,13 @@ class EffectDeniedError(EffectLedgerError):
 
 
 class EffectTimeoutError(EffectLedgerError):
-    def __init__(self, idem_key: str, timeout_ms: int) -> None:
+    def __init__(self, idem_key: str, timeout_s: float | None) -> None:
         self.idem_key = idem_key
-        self.timeout_ms = timeout_ms
-        super().__init__(f"Effect {idem_key} did not complete within {timeout_ms}ms")
+        self.timeout_s = timeout_s
+        if timeout_s is not None:
+            super().__init__(f"Effect {idem_key} did not complete within {timeout_s}s")
+        else:
+            super().__init__(f"Effect {idem_key} timed out")
 
 
 class EffectFailedError(EffectLedgerError):
