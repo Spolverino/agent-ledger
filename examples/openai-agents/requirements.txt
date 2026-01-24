@@ -1,0 +1,2 @@
+agent-ledger>=0.1.0
+openai-agents>=0.1.0
