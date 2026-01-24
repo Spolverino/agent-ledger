@@ -35,7 +35,7 @@ async def charge_customer(
     """Charge a customer's credit card."""
 
     async def _handler(effect):
-        print(f"  💳 Charging ${amount_cents/100:.2f} {currency.upper()}...")
+        print(f"  💳 Charging ${amount_cents / 100:.2f} {currency.upper()}...")
         return {"charge_id": "ch_xxx", "amount": amount_cents, "status": "succeeded"}
 
     result = await ledger.run(
@@ -46,7 +46,7 @@ async def charge_customer(
         ),
         handler=_handler,
     )
-    return f"Charged ${amount_cents/100:.2f}. Charge ID: {result['charge_id']}"
+    return f"Charged ${amount_cents / 100:.2f}. Charge ID: {result['charge_id']}"
 
 
 @function_tool

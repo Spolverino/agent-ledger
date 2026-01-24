@@ -9,7 +9,9 @@ Usage:
     python agent.py
 """
 
+import asyncio
 import os
+from functools import wraps
 
 from crewai import Agent, Crew, Process, Task
 from crewai.tools import tool
@@ -31,9 +33,8 @@ def idempotent(tool_name: str):
     """Decorator to wrap a tool function with agent-ledger idempotency."""
 
     def decorator(func):
+        @wraps(func)  # Preserves function signature for CrewAI schema generation
         def wrapper(*args, **kwargs):
-            import asyncio
-
             async def _run():
                 async def _handler(effect):
                     result = func(*args, **kwargs)
@@ -44,14 +45,8 @@ def idempotent(tool_name: str):
                     handler=_handler,
                 )
 
-            loop = asyncio.new_event_loop()
-            try:
-                return loop.run_until_complete(_run())
-            finally:
-                loop.close()
+            return asyncio.run(_run())
 
-        wrapper.__name__ = func.__name__
-        wrapper.__doc__ = func.__doc__
         return wrapper
 
     return decorator
@@ -67,8 +62,8 @@ def charge_customer(amount_cents: int, currency: str = "usd") -> str:
     Charge a customer's credit card.
     Amount is in cents (e.g., 5000 = $50.00).
     """
-    print(f"  💳 Charging ${amount_cents/100:.2f} {currency.upper()}...")
-    return f"Charged ${amount_cents/100:.2f} {currency.upper()}. Charge ID: ch_xxx"
+    print(f"  💳 Charging ${amount_cents / 100:.2f} {currency.upper()}...")
+    return f"Charged ${amount_cents / 100:.2f} {currency.upper()}. Charge ID: ch_xxx"
 
 
 @tool("Send Email")
