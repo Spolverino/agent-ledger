@@ -437,15 +437,15 @@ await ledger.run(
     handler=my_handler,
     run_options=RunOptions(
         concurrency=ConcurrencyOptions(
-            effect_timeout_s=30.0,       # Timeout for in-flight effects (default: 30s)
-            approval_timeout_s=None,     # Timeout for human approval (default: None = indefinite)
+            effect_timeout_s=30.0,       # How long to wait for another worker to finish (default: 30s)
+            approval_timeout_s=None,     # How long to wait for human approval (default: None = indefinite)
             initial_interval_s=0.05,     # First poll interval (default: 50ms)
-            max_interval_s=1.0,          # Cap for backoff interval (default: 1s)
-            backoff_multiplier=1.5,      # Exponential backoff rate (default: 1.5x)
-            jitter_factor=0.3,           # Random jitter to avoid thundering herd (default: 0.3)
+            max_interval_s=1.0,          # Max poll interval after backoff (default: 1s)
+            backoff_multiplier=1.5,      # Poll interval multiplier each retry (default: 1.5x)
+            jitter_factor=0.3,           # Random jitter to prevent thundering herd (default: 0.3)
         ),
         stale=StaleOptions(
-            after_ms=60_000,             # Take over stale PROCESSING effects (default: 0 = disabled)
+            after_ms=60_000,             # Take over PROCESSING effects older than this (default: 0 = disabled)
         ),
     ),
 )
@@ -458,7 +458,7 @@ ledger = EffectLedger(
         store=store,
         defaults=LedgerDefaults(
             run=RunOptions(
-                concurrency=ConcurrencyOptions(effect_timeout_s=60.0),  # 60s for effects
+                concurrency=ConcurrencyOptions(effect_timeout_s=60.0),
             ),
         ),
     ),
@@ -466,8 +466,8 @@ ledger = EffectLedger(
 ```
 
 **Polling behavior**: `run()` polls with exponential backoff (50ms initial, 1.5x growth, 1s max, 30% jitter).
-- **In-flight effects**: Times out after `effect_timeout_s` (default: 30s)
-- **Human approval**: Waits `approval_timeout_s` (default: `None` = indefinite)
+- **Concurrent workers**: If another worker is already processing the same effect, wait up to `effect_timeout_s` (default: 30s) for them to finish
+- **Human approval**: Wait up to `approval_timeout_s` for approval (default: `None` = wait indefinitely)
 
 ---
 

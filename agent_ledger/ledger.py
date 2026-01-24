@@ -86,18 +86,25 @@ def _get_concurrency_field(
     field: str,
     default: Any,
 ) -> Any:
-    """Get a concurrency option field with proper None handling."""
-    per_call_val = (
-        getattr(per_call.concurrency, field, None)
-        if per_call and per_call.concurrency
-        else None
-    )
-    defaults_val = (
-        getattr(instance_defaults.concurrency, field, None)
+    """Get a concurrency option field using Pydantic's model_fields_set.
+
+    Priority: per_call (if explicitly set) > instance_defaults (if explicitly set) > default.
+    Uses model_fields_set to distinguish "not provided" from "explicitly set to None".
+    """
+    per_call_conc = per_call.concurrency if per_call and per_call.concurrency else None
+    defaults_conc = (
+        instance_defaults.concurrency
         if instance_defaults and instance_defaults.concurrency
         else None
     )
-    return _coalesce(per_call_val, defaults_val, default)
+
+    if per_call_conc is not None and field in per_call_conc.model_fields_set:
+        return getattr(per_call_conc, field)
+
+    if defaults_conc is not None and field in defaults_conc.model_fields_set:
+        return getattr(defaults_conc, field)
+
+    return default
 
 
 def _merge_options(

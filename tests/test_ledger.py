@@ -19,6 +19,7 @@ from agent_ledger import (
     EffectStatus,
     EffectStoreError,
     EffectTimeoutError,
+    LedgerDefaults,
     LedgerHooks,
     MemoryStore,
     RunOptions,
@@ -1800,3 +1801,329 @@ class TestPolicyHook:
 
         await ledger.run(call, handler, hooks=hooks)
         assert len(policy_calls) == 1
+
+
+# -----------------------------------------------------------------------------
+# Config Merging: _merge_options / _get_concurrency_field
+# -----------------------------------------------------------------------------
+
+
+class TestConfigMerging:
+    def test_per_call_explicit_none_overrides_instance_default(self) -> None:
+        from agent_ledger.ledger import _merge_options
+
+        instance_defaults = RunOptions(
+            concurrency=ConcurrencyOptions(approval_timeout_s=60.0)
+        )
+        per_call = RunOptions(concurrency=ConcurrencyOptions(approval_timeout_s=None))
+
+        merged = _merge_options(instance_defaults, per_call)
+
+        assert merged.concurrency.approval_timeout_s is None
+
+    def test_per_call_value_overrides_instance_default(self) -> None:
+        from agent_ledger.ledger import _merge_options
+
+        instance_defaults = RunOptions(
+            concurrency=ConcurrencyOptions(approval_timeout_s=60.0)
+        )
+        per_call = RunOptions(concurrency=ConcurrencyOptions(approval_timeout_s=120.0))
+
+        merged = _merge_options(instance_defaults, per_call)
+
+        assert merged.concurrency.approval_timeout_s == 120.0
+
+    def test_unset_per_call_uses_instance_default(self) -> None:
+        from agent_ledger.ledger import _merge_options
+
+        instance_defaults = RunOptions(
+            concurrency=ConcurrencyOptions(approval_timeout_s=60.0)
+        )
+        per_call = RunOptions(concurrency=ConcurrencyOptions())
+
+        merged = _merge_options(instance_defaults, per_call)
+
+        assert merged.concurrency.approval_timeout_s == 60.0
+
+    def test_unset_both_uses_global_default(self) -> None:
+        from agent_ledger.ledger import DEFAULT_CONCURRENCY, _merge_options
+
+        instance_defaults = RunOptions(concurrency=ConcurrencyOptions())
+        per_call = RunOptions(concurrency=ConcurrencyOptions())
+
+        merged = _merge_options(instance_defaults, per_call)
+
+        assert (
+            merged.concurrency.approval_timeout_s
+            == DEFAULT_CONCURRENCY.approval_timeout_s
+        )
+
+    def test_no_options_uses_global_default(self) -> None:
+        from agent_ledger.ledger import DEFAULT_CONCURRENCY, _merge_options
+
+        merged = _merge_options(None, None)
+
+        assert (
+            merged.concurrency.approval_timeout_s
+            == DEFAULT_CONCURRENCY.approval_timeout_s
+        )
+        assert (
+            merged.concurrency.effect_timeout_s == DEFAULT_CONCURRENCY.effect_timeout_s
+        )
+
+    def test_instance_explicit_none_preserved_when_per_call_unset(self) -> None:
+        from agent_ledger.ledger import _merge_options
+
+        instance_defaults = RunOptions(
+            concurrency=ConcurrencyOptions(approval_timeout_s=None)
+        )
+        per_call = RunOptions(concurrency=ConcurrencyOptions())
+
+        merged = _merge_options(instance_defaults, per_call)
+
+        assert merged.concurrency.approval_timeout_s is None
+
+    def test_all_concurrency_fields_merge_correctly(self) -> None:
+        from agent_ledger.ledger import _merge_options
+
+        instance_defaults = RunOptions(
+            concurrency=ConcurrencyOptions(
+                effect_timeout_s=10.0,
+                initial_interval_s=0.1,
+            )
+        )
+        per_call = RunOptions(
+            concurrency=ConcurrencyOptions(
+                effect_timeout_s=20.0,
+                max_interval_s=5.0,
+            )
+        )
+
+        merged = _merge_options(instance_defaults, per_call)
+
+        assert merged.concurrency.effect_timeout_s == 20.0
+        assert merged.concurrency.initial_interval_s == 0.1
+        assert merged.concurrency.max_interval_s == 5.0
+
+    def test_each_concurrency_field_merges_independently(self) -> None:
+        from agent_ledger.ledger import DEFAULT_CONCURRENCY, _merge_options
+
+        instance_defaults = RunOptions(
+            concurrency=ConcurrencyOptions(
+                effect_timeout_s=10.0,
+                approval_timeout_s=30.0,
+                initial_interval_s=0.2,
+            )
+        )
+        per_call = RunOptions(
+            concurrency=ConcurrencyOptions(
+                approval_timeout_s=60.0,
+                max_interval_s=2.0,
+                backoff_multiplier=2.0,
+            )
+        )
+
+        merged = _merge_options(instance_defaults, per_call)
+
+        assert merged.concurrency.effect_timeout_s == 10.0
+        assert merged.concurrency.approval_timeout_s == 60.0
+        assert merged.concurrency.initial_interval_s == 0.2
+        assert merged.concurrency.max_interval_s == 2.0
+        assert merged.concurrency.backoff_multiplier == 2.0
+        assert merged.concurrency.jitter_factor == DEFAULT_CONCURRENCY.jitter_factor
+
+    def test_stale_options_per_call_overrides_instance(self) -> None:
+        from agent_ledger.ledger import _merge_options
+
+        instance_defaults = RunOptions(stale=StaleOptions(after_ms=5000))
+        per_call = RunOptions(stale=StaleOptions(after_ms=10000))
+
+        merged = _merge_options(instance_defaults, per_call)
+
+        assert merged.stale.after_ms == 10000
+
+    def test_stale_options_instance_used_when_per_call_unset(self) -> None:
+        from agent_ledger.ledger import _merge_options
+
+        instance_defaults = RunOptions(stale=StaleOptions(after_ms=5000))
+        per_call = RunOptions()
+
+        merged = _merge_options(instance_defaults, per_call)
+
+        assert merged.stale.after_ms == 5000
+
+    def test_stale_options_default_when_both_unset(self) -> None:
+        from agent_ledger.ledger import DEFAULT_STALE, _merge_options
+
+        merged = _merge_options(None, None)
+
+        assert merged.stale.after_ms == DEFAULT_STALE.after_ms
+
+    def test_mixed_concurrency_and_stale_options(self) -> None:
+        from agent_ledger.ledger import _merge_options
+
+        instance_defaults = RunOptions(
+            concurrency=ConcurrencyOptions(effect_timeout_s=15.0),
+            stale=StaleOptions(after_ms=3000),
+        )
+        per_call = RunOptions(
+            concurrency=ConcurrencyOptions(approval_timeout_s=45.0),
+            stale=StaleOptions(after_ms=6000),
+        )
+
+        merged = _merge_options(instance_defaults, per_call)
+
+        assert merged.concurrency.effect_timeout_s == 15.0
+        assert merged.concurrency.approval_timeout_s == 45.0
+        assert merged.stale.after_ms == 6000
+
+
+class TestConfigMergingPublicAPI:
+    async def test_run_options_override_ledger_defaults(
+        self, store: MemoryStore
+    ) -> None:
+        ledger = EffectLedger(
+            EffectLedgerOptions(
+                store=store,
+                defaults=LedgerDefaults(
+                    run=RunOptions(
+                        concurrency=ConcurrencyOptions(effect_timeout_s=100.0)
+                    )
+                ),
+            )
+        )
+
+        call = make_call(args={"config_test": "run_options_override"})
+
+        async def handler(effect: Any) -> str:
+            return "done"
+
+        result = await ledger.run(
+            call,
+            handler,
+            run_options=RunOptions(
+                concurrency=ConcurrencyOptions(effect_timeout_s=50.0)
+            ),
+        )
+
+        assert result == "done"
+
+    async def test_ledger_defaults_applied_when_no_run_options(
+        self, store: MemoryStore
+    ) -> None:
+        ledger = EffectLedger(
+            EffectLedgerOptions(
+                store=store,
+                defaults=LedgerDefaults(
+                    run=RunOptions(
+                        concurrency=ConcurrencyOptions(effect_timeout_s=100.0)
+                    )
+                ),
+            )
+        )
+
+        call = make_call(args={"config_test": "ledger_defaults"})
+
+        async def handler(effect: Any) -> str:
+            return "done"
+
+        result = await ledger.run(call, handler)
+
+        assert result == "done"
+
+    async def test_approval_timeout_none_allows_indefinite_wait(
+        self, store: MemoryStore
+    ) -> None:
+        ledger = EffectLedger(
+            EffectLedgerOptions(
+                store=store,
+                defaults=LedgerDefaults(
+                    run=RunOptions(
+                        concurrency=ConcurrencyOptions(approval_timeout_s=60.0)
+                    )
+                ),
+            )
+        )
+
+        call = make_call(args={"config_test": "indefinite_approval"})
+
+        async def handler(effect: Any) -> str:
+            return "approved"
+
+        hooks = LedgerHooks(requires_approval=lambda _: True)
+
+        async def run_and_approve() -> str:
+            task = asyncio.create_task(
+                ledger.run(
+                    call,
+                    handler,
+                    hooks=hooks,
+                    run_options=RunOptions(
+                        concurrency=ConcurrencyOptions(approval_timeout_s=None)
+                    ),
+                )
+            )
+            await asyncio.sleep(0.05)
+            effect = (await store.list_effects())[0]
+            await ledger.approve(effect.idem_key)
+            return await task
+
+        result = await run_and_approve()
+        assert result == "approved"
+
+    async def test_effect_timeout_triggers_on_stale_processing(
+        self, store: MemoryStore
+    ) -> None:
+        ledger = EffectLedger(EffectLedgerOptions(store=store))
+
+        call = make_call(args={"config_test": "effect_timeout"})
+
+        begin_result = await ledger.begin(call)
+        assert begin_result.effect.status == EffectStatus.PROCESSING
+
+        async def handler(effect: Any) -> str:
+            return "done"
+
+        with pytest.raises(EffectTimeoutError):
+            await ledger.run(
+                call,
+                handler,
+                run_options=RunOptions(
+                    concurrency=ConcurrencyOptions(effect_timeout_s=0.01)
+                ),
+            )
+
+    async def test_stale_options_via_run_options(self, store: MemoryStore) -> None:
+        ledger = EffectLedger(EffectLedgerOptions(store=store))
+
+        call = make_call(args={"config_test": "stale_options"})
+
+        async def handler(effect: Any) -> str:
+            return "done"
+
+        result = await ledger.run(
+            call,
+            handler,
+            run_options=RunOptions(stale=StaleOptions(after_ms=5000)),
+        )
+
+        assert result == "done"
+
+    async def test_stale_options_via_ledger_defaults(self, store: MemoryStore) -> None:
+        ledger = EffectLedger(
+            EffectLedgerOptions(
+                store=store,
+                defaults=LedgerDefaults(
+                    run=RunOptions(stale=StaleOptions(after_ms=5000))
+                ),
+            )
+        )
+
+        call = make_call(args={"config_test": "stale_defaults"})
+
+        async def handler(effect: Any) -> str:
+            return "done"
+
+        result = await ledger.run(call, handler)
+
+        assert result == "done"
