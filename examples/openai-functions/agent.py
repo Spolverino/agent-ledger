@@ -12,8 +12,15 @@ Usage:
 import asyncio
 import json
 import os
+from typing import cast
 
 from openai import AsyncOpenAI
+from openai.types.chat import (
+    ChatCompletionMessageParam,
+    ChatCompletionMessageToolCall,
+    ChatCompletionToolMessageParam,
+    ChatCompletionToolParam,
+)
 
 from agent_ledger import EffectLedger, EffectLedgerOptions, MemoryStore, ToolCall
 
@@ -29,7 +36,7 @@ WORKFLOW_ID = "order-42"
 
 
 async def charge_customer(amount_cents: int, currency: str = "usd") -> dict:
-    print(f"  💳 Charging ${amount_cents/100:.2f} {currency.upper()}...")
+    print(f"  💳 Charging ${amount_cents / 100:.2f} {currency.upper()}...")
     return {"charge_id": "ch_xxx", "amount": amount_cents, "status": "succeeded"}
 
 
@@ -51,7 +58,7 @@ TOOLS = {
     "create_ticket": create_ticket,
 }
 
-TOOL_SCHEMAS = [
+TOOL_SCHEMAS: list[ChatCompletionToolParam] = [
     {
         "type": "function",
         "function": {
@@ -122,7 +129,9 @@ async def execute_tool(name: str, args: dict) -> str:
 
 
 async def run_agent(user_message: str) -> str:
-    messages = [{"role": "user", "content": user_message}]
+    messages: list[ChatCompletionMessageParam] = [
+        {"role": "user", "content": user_message}
+    ]
 
     while True:
         response = await client.chat.completions.create(
@@ -132,25 +141,27 @@ async def run_agent(user_message: str) -> str:
         )
 
         msg = response.choices[0].message
-        messages.append(msg)
+        messages.append(cast("ChatCompletionMessageParam", msg.model_dump()))
 
         if not msg.tool_calls:
-            return msg.content
+            return msg.content or ""
 
         for tool_call in msg.tool_calls:
+            # Only handle function tool calls (not custom tools)
+            if not isinstance(tool_call, ChatCompletionMessageToolCall):
+                continue
             name = tool_call.function.name
             args = json.loads(tool_call.function.arguments)
 
             print(f"\n[Tool: {name}]")
             result = await execute_tool(name, args)
 
-            messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": result,
-                }
-            )
+            tool_message: ChatCompletionToolMessageParam = {
+                "role": "tool",
+                "tool_call_id": tool_call.id,
+                "content": result,
+            }
+            messages.append(tool_message)
 
 
 # --- Main ---
