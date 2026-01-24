@@ -16,7 +16,13 @@ from functools import wraps
 from crewai import Agent, Crew, Process, Task
 from crewai.tools import tool
 
-from agent_ledger import EffectLedger, EffectLedgerOptions, MemoryStore, ToolCall
+from agent_ledger import (
+    EffectLedger,
+    EffectLedgerOptions,
+    LedgerHooks,
+    MemoryStore,
+    ToolCall,
+)
 
 # --- Setup ---
 
@@ -29,8 +35,19 @@ WORKFLOW_ID = "order-42"
 # --- Idempotent tool wrapper ---
 
 
-def idempotent(tool_name: str):
-    """Decorator to wrap a tool function with agent-ledger idempotency."""
+def idempotent(
+    tool_name: str,
+    idempotency_keys: list[str] | None = None,
+    hooks: LedgerHooks | None = None,
+):
+    """
+    Decorator to wrap a tool function with agent-ledger idempotency.
+
+    Args:
+        tool_name: Unique identifier for this tool in the ledger
+        idempotency_keys: Subset of arg names to use for deduplication (default: all args)
+        hooks: LedgerHooks for approval flows and notifications
+    """
 
     def decorator(func):
         @wraps(func)  # Preserves function signature for CrewAI schema generation
@@ -41,8 +58,14 @@ def idempotent(tool_name: str):
                     return result
 
                 return await ledger.run(
-                    ToolCall(workflow_id=WORKFLOW_ID, tool=tool_name, args=kwargs),
+                    ToolCall(
+                        workflow_id=WORKFLOW_ID,
+                        tool=tool_name,
+                        args=kwargs,
+                        idempotency_keys=idempotency_keys,
+                    ),
                     handler=_handler,
+                    hooks=hooks,
                 )
 
             return asyncio.run(_run())
@@ -55,8 +78,17 @@ def idempotent(tool_name: str):
 # --- Tools ---
 
 
+# ADVANCED: Require approval for large charges (> $100)
+charge_hooks = LedgerHooks(
+    requires_approval=lambda call: call.args.get("amount_cents", 0) > 10000,
+    on_approval_required=lambda effect: print(
+        f"  ⏸️  APPROVAL REQUIRED - call ledger.approve('{effect.idem_key}')"
+    ),
+)
+
+
 @tool("Charge Customer")
-@idempotent("stripe.charge")
+@idempotent("stripe.charge", hooks=charge_hooks)
 def charge_customer(amount_cents: int, currency: str = "usd") -> str:
     """
     Charge a customer's credit card.
@@ -66,8 +98,9 @@ def charge_customer(amount_cents: int, currency: str = "usd") -> str:
     return f"Charged ${amount_cents / 100:.2f} {currency.upper()}. Charge ID: ch_xxx"
 
 
+# ADVANCED: Only use recipient + subject for idempotency (ignore body changes)
 @tool("Send Email")
-@idempotent("email.send")
+@idempotent("email.send", idempotency_keys=["to", "subject"])
 def send_email(to: str, subject: str, body: str) -> str:
     """Send an email to a recipient."""
     print(f"  📧 Sending email to {to}: {subject}")

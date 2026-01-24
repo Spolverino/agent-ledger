@@ -23,7 +23,7 @@ Safe retries, crash recovery, and multi-worker coordination.
 </p>
 
 <p>
-<b>Framework-agnostic:</b> wrap any async Python tool handler. Examples: <a href="examples/">LangGraph</a> / <a href="examples/">LangChain</a>.
+<b>Framework-agnostic:</b> wrap any async Python tool handler. Examples: <a href="examples/langchain/">LangGraph</a> / <a href="examples/openai-functions/">OpenAI</a> / <a href="examples/crewai/">CrewAI</a> / <a href="examples/openai-agents/">OpenAI Agents SDK</a>.
 </p>
 
 <p>

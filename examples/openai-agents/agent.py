@@ -14,7 +14,13 @@ from typing import Annotated
 
 from agents import Agent, Runner, function_tool
 
-from agent_ledger import EffectLedger, EffectLedgerOptions, MemoryStore, ToolCall
+from agent_ledger import (
+    EffectLedger,
+    EffectLedgerOptions,
+    LedgerHooks,
+    MemoryStore,
+    ToolCall,
+)
 
 # --- Setup ---
 
@@ -38,6 +44,15 @@ async def charge_customer(
         print(f"  💳 Charging ${amount_cents / 100:.2f} {currency.upper()}...")
         return {"charge_id": "ch_xxx", "amount": amount_cents, "status": "succeeded"}
 
+    # ADVANCED: Require human approval for large charges (> $100).
+    # The agent will pause until approve(idem_key) or deny(idem_key) is called.
+    hooks = LedgerHooks(
+        requires_approval=lambda call: call.args.get("amount_cents", 0) > 10000,
+        on_approval_required=lambda effect: print(
+            f"  ⏸️  APPROVAL REQUIRED - call ledger.approve('{effect.idem_key}')"
+        ),
+    )
+
     result = await ledger.run(
         ToolCall(
             workflow_id=WORKFLOW_ID,
@@ -45,6 +60,7 @@ async def charge_customer(
             args={"amount_cents": amount_cents, "currency": currency},
         ),
         handler=_handler,
+        hooks=hooks,
     )
     return f"Charged ${amount_cents / 100:.2f}. Charge ID: {result['charge_id']}"
 
@@ -61,11 +77,14 @@ async def send_email(
         print(f"  📧 Sending email to {to}: {subject}")
         return {"message_id": "msg_xxx", "status": "sent"}
 
+    # ADVANCED: Use idempotency_keys to deduplicate by recipient + subject only.
+    # If the body changes (e.g., timestamps), we still return the cached result.
     result = await ledger.run(
         ToolCall(
             workflow_id=WORKFLOW_ID,
             tool="email.send",
             args={"to": to, "subject": subject, "body": body},
+            idempotency_keys=["to", "subject"],  # Only these keys matter for dedup
         ),
         handler=_handler,
     )

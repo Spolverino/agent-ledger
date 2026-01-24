@@ -22,7 +22,13 @@ from openai.types.chat import (
     ChatCompletionToolParam,
 )
 
-from agent_ledger import EffectLedger, EffectLedgerOptions, MemoryStore, ToolCall
+from agent_ledger import (
+    EffectLedger,
+    EffectLedgerOptions,
+    LedgerHooks,
+    MemoryStore,
+    ToolCall,
+)
 
 # --- Setup ---
 
@@ -118,9 +124,32 @@ async def execute_tool(name: str, args: dict) -> str:
     async def _handler(effect):
         return await tool_fn(**args)
 
+    # ADVANCED: Configure hooks for approval flows and custom idempotency keys
+    hooks = None
+    idempotency_keys = None
+
+    if name == "charge_customer":
+        # Require human approval for large charges (> $100)
+        hooks = LedgerHooks(
+            requires_approval=lambda call: call.args.get("amount_cents", 0) > 10000,
+            on_approval_required=lambda effect: print(
+                f"  ⏸️  APPROVAL REQUIRED - call ledger.approve('{effect.idem_key}')"
+            ),
+        )
+
+    if name == "send_email":
+        # Only use recipient + subject for idempotency (ignore body changes)
+        idempotency_keys = ["to", "subject"]
+
     result = await ledger.run(
-        ToolCall(workflow_id=WORKFLOW_ID, tool=name, args=args),
+        ToolCall(
+            workflow_id=WORKFLOW_ID,
+            tool=name,
+            args=args,
+            idempotency_keys=idempotency_keys,  # None = use all args (default)
+        ),
         handler=_handler,
+        hooks=hooks,
     )
     return json.dumps(result)
 

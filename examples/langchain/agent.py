@@ -16,7 +16,13 @@ from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import create_react_agent
 
-from agent_ledger import EffectLedger, EffectLedgerOptions, MemoryStore, ToolCall
+from agent_ledger import (
+    EffectLedger,
+    EffectLedgerOptions,
+    LedgerHooks,
+    MemoryStore,
+    ToolCall,
+)
 
 # --- Setup ---
 
@@ -36,6 +42,18 @@ async def charge_customer(amount_cents: int, currency: str = "usd") -> dict:
         # In production: return await stripe.PaymentIntent.create(...)
         return {"charge_id": "ch_xxx", "amount": amount_cents, "status": "succeeded"}
 
+    # ADVANCED: Require human approval for large charges (> $100).
+    # The agent will pause until approve(idem_key) or deny(idem_key) is called.
+    hooks = LedgerHooks(
+        # Policy: returns True if this call needs approval
+        requires_approval=lambda call: call.args.get("amount_cents", 0) > 10000,
+        # Notification: fires when approval is needed (send to Slack, email, etc.)
+        on_approval_required=lambda effect: print(
+            f"  ⏸️  APPROVAL REQUIRED for ${amount_cents / 100:.2f} - "
+            f"call ledger.approve('{effect.idem_key}') to proceed"
+        ),
+    )
+
     return await ledger.run(
         ToolCall(
             workflow_id=WORKFLOW_ID,
@@ -43,6 +61,7 @@ async def charge_customer(amount_cents: int, currency: str = "usd") -> dict:
             args={"amount_cents": amount_cents, "currency": currency},
         ),
         handler=_handler,
+        hooks=hooks,
     )
 
 
@@ -55,11 +74,16 @@ async def send_email(to: str, subject: str, body: str) -> dict:
         # In production: return await sendgrid.send(...)
         return {"message_id": "msg_xxx", "status": "sent"}
 
+    # ADVANCED: Use idempotency_keys to deduplicate by recipient + subject only.
+    # This means if we retry with a different body, we still get the cached result.
+    # Useful when the body contains timestamps or other non-deterministic content.
     return await ledger.run(
         ToolCall(
             workflow_id=WORKFLOW_ID,
             tool="email.send",
             args={"to": to, "subject": subject, "body": body},
+            # Only these keys are used for the idempotency hash:
+            idempotency_keys=["to", "subject"],
         ),
         handler=_handler,
     )
@@ -86,7 +110,7 @@ async def create_ticket(title: str, description: str, priority: str = "medium") 
 
 # --- Agent ---
 
-WORKFLOW_ID = "order-42"  # Scope for idempotency - use order ID, session ID, webhook idempotency key, etc.
+WORKFLOW_ID = "order-42"  # Scope for idempotency - use order ID, session ID, webhook idempotency key, thread id, etc.
 
 
 async def main():
